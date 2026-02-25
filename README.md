@@ -29,6 +29,7 @@ dependencyResolutionManagement {
         maven { url = uri("https://jitpack.io") }
     }
 }
+```
 
 ### 2. Add the dependency to your app's `build.gradle.kts`
 
@@ -37,6 +38,7 @@ dependencyResolutionManagement {
 dependencies {
     implementation("com.github.jsparrow2006:tbox-proxy:1.0.0")
 }
+```
 
 ✅ Requires Kotlin ≥ 1.8 and AGP ≥ 8.0.
 
@@ -50,6 +52,7 @@ val client = TboxProxyClient(
     defaultIp = "192.168.225.1", // optional
     defaultPort = 50047           // optional
 )
+```
 
 ### 2. Set up event handlers
 
@@ -72,11 +75,13 @@ client.onEvent = { event ->
         }
     }
 }
+```
 
 ### 3. Connect and start receiving data
 
 ```kotlin
 client.connect()
+```
 
 🔁 On first launch (no host running), the library automatically starts its own TboxHostService and connects to the TBox using the provided IP/port.
 🔁 Subsequent apps simply subscribe to the existing host.
@@ -86,6 +91,7 @@ client.connect()
 ```kotlin
 val command = buildCommand(...) // your custom command builder
 client.sendCommand(command)
+```
 
 ### 5. Clean up
 
@@ -94,6 +100,7 @@ override fun onDestroy() {
     client.disconnect()
     super.onDestroy()
 }
+```
 
 ## 🔐 Required Permissions
 
@@ -101,6 +108,7 @@ override fun onDestroy() {
 ```kotlin
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 <uses-permission android:name="android.permission.POST_NOTIFICATIONS" /> <!-- Android 13+ -->
+```
 
 Ensure your app has permission to run foreground services (especially on Android 12+).
 
@@ -126,6 +134,7 @@ fun buildVersionRequest(): ByteArray {
     val checksum = xorSum(withPayload)
     return withPayload + checksum
 }
+```
 
 Utility functions like **fillHeader**, **xorSum**, and **extractData** are available in **dashingineering.jetour.tboxcore.util**.
 

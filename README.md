@@ -42,6 +42,8 @@ dependencies {
 
 ✅ Requires Kotlin ≥ 1.8 and AGP ≥ 8.0.
 
+---
+
 ## 🚀 Usage
 
 ### 1. Create a client instance
@@ -102,6 +104,8 @@ override fun onDestroy() {
 }
 ```
 
+---
+
 ## 🔐 Required Permissions
 
 ### The library automatically adds to your manifest:
@@ -120,6 +124,8 @@ Ensure your app has permission to run foreground services (especially on Android
 - No UI dependencies: works in services, workers, or background tasks.
 - Self-contained: includes all protocol utilities (**fillHeader**, **xorSum**, etc.).
 
+---
+
 ## 🛠 Example: Building a Command
 
 ```kotlin
@@ -137,6 +143,8 @@ fun buildVersionRequest(): ByteArray {
 ```
 
 Utility functions like **fillHeader**, **xorSum**, and **extractData** are available in **dashingineering.jetour.tboxcore.util**.
+
+---
 
 ## 📄 License
 

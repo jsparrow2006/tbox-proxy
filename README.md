@@ -140,4 +140,4 @@ Utility functions like **fillHeader**, **xorSum**, and **extractData** are avail
 
 ## 📄 License
 
-MIT License. See LICENSE
+MIT License. See [LICENSE](LICENSE)

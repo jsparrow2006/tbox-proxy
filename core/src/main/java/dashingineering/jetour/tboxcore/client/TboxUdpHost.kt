@@ -35,7 +35,7 @@ class TboxUdpHost(
             address = InetAddress.getByName(ip)
             _isRunning = true
             notifyListeners { onHostConnected() }
-            startListener()
+            startListener(port)
             true
         } catch (e: Exception) {
             log("ERROR", "UDP", "Start failed: ${e.message}")
@@ -69,7 +69,7 @@ class TboxUdpHost(
         }
     }
 
-    private fun startListener() {
+    private fun startListener(port: Int) {
         listenJob = coroutineScope.launch {
             val buffer = ByteArray(4096)
             val packet = DatagramPacket(buffer, buffer.size)
@@ -99,13 +99,12 @@ class TboxUdpHost(
     }
 
     private suspend fun notifyListeners(block: suspend TboxHostListener.() -> Unit) {
-        // Копируем список, чтобы избежать ConcurrentModification
         val snapshot = listeners.toList()
         snapshot.forEach { listener ->
             try {
                 listener.block()
             } catch (e: Exception) {
-                // игнорируем мёртвые слушатели
+                // ignore dead listeners
             }
         }
     }

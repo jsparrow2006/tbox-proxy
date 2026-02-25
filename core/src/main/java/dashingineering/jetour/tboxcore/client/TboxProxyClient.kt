@@ -4,10 +4,15 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.os.Build
 import android.os.IBinder
+import androidx.annotation.RequiresApi
+import androidx.core.content.ContextCompat
 import dashingineering.jetour.tboxcore.ITboxHostCallback
 import dashingineering.jetour.tboxcore.ITboxHostService
+import dashingineering.jetour.tboxcore.service.TboxHostService
 import kotlinx.coroutines.*
+import kotlin.random.Random
 
 class TboxProxyClient(
     private val context: Context,
@@ -16,7 +21,6 @@ class TboxProxyClient(
     private var service: ITboxHostService? = null
     private var callback: ITboxHostCallback? = null
     private var isConnected = false
-    private var hostPackageName: String? = null
 
     var onEvent: (Event) -> Unit = {}
     var onError: (String) -> Unit = {}
@@ -34,25 +38,37 @@ class TboxProxyClient(
             service = ITboxHostService.Stub.asInterface(binder)
             callback?.let { service?.registerCallback(it) }
             isConnected = true
-            hostPackageName = service?.hostPackageName
             onEvent(Event.HostConnected)
         }
 
+        @RequiresApi(Build.VERSION_CODES.O)
         override fun onServiceDisconnected(name: ComponentName?) {
             isConnected = false
             onEvent(Event.HostDied)
-            // ← Здесь клиент может решить: "я стану хостом"
+            scope.launch {
+                delay(Random.nextLong(200, 800))
+                becomeHostIfPossible()
+            }
         }
     }
 
-    fun connect(): Boolean {
-        val intent = Intent().apply {
-            setComponent(ComponentName(
-                "dashingineering.jetour.tboxhost", // ← package хост-приложения
-                "dashingineering.jetour.tboxhost.TboxHostService"
-            ))
+    @RequiresApi(Build.VERSION_CODES.O)
+    fun connect() {
+        val intent = Intent("dashingineering.jetour.tboxcore.HOST_SERVICE")
+        val resolveInfo = context.packageManager.resolveService(intent, 0)
+
+        if (resolveInfo != null) {
+            val componentName = ComponentName(
+                resolveInfo.serviceInfo.packageName,
+                resolveInfo.serviceInfo.name
+            )
+            val bindIntent = Intent().apply { component = componentName }
+            if (context.bindService(bindIntent, connection, Context.BIND_AUTO_CREATE)) {
+                return
+            }
         }
-        return context.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+
+        becomeHost()
     }
 
     fun disconnect() {
@@ -66,7 +82,29 @@ class TboxProxyClient(
         return service?.sendCommand(command) ?: false
     }
 
-    fun isRunning(): Boolean = service?.isRunning ?: false
+    fun getHostPackageName(): String {
+        return service?.getHostPackageName() ?: ""
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun becomeHost() {
+        scope.launch {
+            delay(Random.nextLong(100, 500))
+            try {
+                val intent = Intent(context, TboxHostService::class.java)
+                ContextCompat.startForegroundService(context, intent)
+                delay(800)
+                connect()
+            } catch (e: Exception) {
+                onError("Failed to become host: ${e.message}")
+            }
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun becomeHostIfPossible() {
+        becomeHost()
+    }
 
     init {
         callback = object : ITboxHostCallback.Stub() {
@@ -78,16 +116,16 @@ class TboxProxyClient(
                 scope.launch { onEvent(Event.LogMessage(level, tag, message)) }
             }
 
-            override fun onHostDied() {
-                scope.launch { onEvent(Event.HostDied) }
-            }
-
             override fun onHostConnected() {
                 scope.launch { onEvent(Event.HostConnected) }
             }
 
             override fun onHostDisconnected() {
                 scope.launch { onEvent(Event.HostDisconnected) }
+            }
+
+            override fun onHostDied() {
+                scope.launch { onEvent(Event.HostDied) }
             }
         }
     }

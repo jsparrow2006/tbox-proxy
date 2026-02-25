@@ -4,23 +4,27 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.os.Build
-import android.os.IBinder
-import androidx.annotation.RequiresApi
+import android.content.pm.PackageManager
+import android.os.*
 import androidx.core.content.ContextCompat
 import dashingineering.jetour.tboxcore.ITboxHostCallback
 import dashingineering.jetour.tboxcore.ITboxHostService
+import dashingineering.jetour.tboxcore.constants.TboxConstants
 import dashingineering.jetour.tboxcore.service.TboxHostService
 import kotlinx.coroutines.*
 import kotlin.random.Random
 
 class TboxProxyClient(
     private val context: Context,
+    private val tBoxIp: String = TboxConstants.DEFAULT_TBOX_IP,
+    private val tBoxPort: Int = TboxConstants.DEFAULT_TBOX_PORT,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 ) {
     private var service: ITboxHostService? = null
     private var callback: ITboxHostCallback? = null
     private var isConnected = false
+    private var isBound = false
+    private var isBecomingHost = false
 
     var onEvent: (Event) -> Unit = {}
     var onError: (String) -> Unit = {}
@@ -41,7 +45,6 @@ class TboxProxyClient(
             onEvent(Event.HostConnected)
         }
 
-        @RequiresApi(Build.VERSION_CODES.O)
         override fun onServiceDisconnected(name: ComponentName?) {
             isConnected = false
             onEvent(Event.HostDied)
@@ -52,28 +55,43 @@ class TboxProxyClient(
         }
     }
 
-    @RequiresApi(Build.VERSION_CODES.O)
     fun connect() {
+        // Ищем существующий хост
         val intent = Intent("dashingineering.jetour.tboxcore.HOST_SERVICE")
-        val resolveInfo = context.packageManager.resolveService(intent, 0)
+        val resolveInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.resolveService(intent, PackageManager.ResolveInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.resolveService(intent, 0)
+        }
 
         if (resolveInfo != null) {
+            // Хост найден — просто подключаемся
             val componentName = ComponentName(
                 resolveInfo.serviceInfo.packageName,
                 resolveInfo.serviceInfo.name
             )
             val bindIntent = Intent().apply { component = componentName }
             if (context.bindService(bindIntent, connection, Context.BIND_AUTO_CREATE)) {
+                isBound = true
                 return
             }
         }
 
+        // Хоста нет — становимся хостом
         becomeHost()
     }
 
     fun disconnect() {
         callback?.let { service?.unregisterCallback(it) }
-        context.unbindService(connection)
+        if (isBound) {
+            try {
+                context.unbindService(connection)
+            } catch (e: IllegalArgumentException) {
+                // ignore
+            }
+            isBound = false
+        }
         service = null
         isConnected = false
     }
@@ -86,29 +104,58 @@ class TboxProxyClient(
         return service?.getHostPackageName() ?: ""
     }
 
-    @RequiresApi(Build.VERSION_CODES.O)
     private fun becomeHost() {
+        if (isBecomingHost) return
+        isBecomingHost = true
         scope.launch {
-            delay(Random.nextLong(100, 500))
             try {
+                delay(Random.nextLong(100, 500))
+
+                // Запускаем встроенный сервис из библиотеки
                 val intent = Intent(context, TboxHostService::class.java)
                 ContextCompat.startForegroundService(context, intent)
+
                 delay(800)
-                connect()
+
+                // Подключаемся к себе
+                val selfInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.packageManager.resolveService(intent, PackageManager.ResolveInfoFlags.of(0))
+                } else {
+                    @Suppress("DEPRECATION")
+                    context.packageManager.resolveService(intent, 0)
+                }
+
+                if (selfInfo != null) {
+                    val componentName = ComponentName(
+                        selfInfo.serviceInfo.packageName,
+                        selfInfo.serviceInfo.name
+                    )
+                    val bindIntent = Intent().apply { component = componentName }
+                    if (context.bindService(bindIntent, connection, Context.BIND_AUTO_CREATE)) {
+                        isBound = true
+                        // ← Ключевой момент: инициируем подключение к TBox
+                        service?.start(tBoxIp, tBoxPort)
+                    } else {
+                        onError("Failed to bind to self-host")
+                    }
+                } else {
+                    onError("Self-host not found after launch")
+                }
             } catch (e: Exception) {
                 onError("Failed to become host: ${e.message}")
+            } finally {
+                isBecomingHost = false
             }
         }
     }
 
-    @RequiresApi(Build.VERSION_CODES.O)
     private fun becomeHostIfPossible() {
         becomeHost()
     }
 
     init {
         callback = object : ITboxHostCallback.Stub() {
-            override fun onDataReceived( data: ByteArray) {
+            override fun onDataReceived(data: ByteArray) {
                 scope.launch { onEvent(Event.DataReceived(data)) }
             }
 

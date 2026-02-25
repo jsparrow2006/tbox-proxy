@@ -10,10 +10,13 @@ import java.net.InetAddress
 
 class TboxUdpHost(
     private val coroutineScope: CoroutineScope,
+    private val defaultIp: String = "192.168.225.1",
+    private val defaultPort: Int = 50047,
     private val listeners: MutableList<TboxHostListener> = mutableListOf()
 ) {
     private var socket: DatagramSocket? = null
     private var address: InetAddress? = null
+    private var remotePort: Int = -1
     private val mutex = Mutex()
     private var listenJob: Job? = null
     private var _isRunning = false
@@ -28,14 +31,18 @@ class TboxUdpHost(
         listeners -= listener
     }
 
-    suspend fun start(ip: String, port: Int): Boolean {
+    suspend fun start(ip: String? = null, port: Int? = null): Boolean {
+        val actualIp = ip ?: defaultIp
+        val actualPort = port ?: defaultPort
+
         if (_isRunning) return true
         return try {
             socket = DatagramSocket().apply { soTimeout = 1000 }
-            address = InetAddress.getByName(ip)
+            address = InetAddress.getByName(actualIp)
+            remotePort = actualPort
             _isRunning = true
             notifyListeners { onHostConnected() }
-            startListener(port)
+            startListener()
             true
         } catch (e: Exception) {
             log("ERROR", "UDP", "Start failed: ${e.message}")
@@ -51,14 +58,16 @@ class TboxUdpHost(
         socket?.close()
         socket = null
         address = null
+        remotePort = -1
         _isRunning = false
         notifyListeners { onHostDisconnected() }
     }
 
     suspend fun sendCommand(command: ByteArray): Boolean {
-        if (!_isRunning || socket == null || address == null) return false
+        if (!_isRunning || socket == null || address == null || remotePort == -1) return false
         return try {
-            val packet = DatagramPacket(command, command.size, address, socket!!.localPort)
+            // Используем remotePort вместо socket.localPort
+            val packet = DatagramPacket(command, command.size, address, remotePort)
             mutex.withLock {
                 socket!!.send(packet)
             }
@@ -69,7 +78,7 @@ class TboxUdpHost(
         }
     }
 
-    private fun startListener(port: Int) {
+    private fun startListener() {  // Убираем параметр port
         listenJob = coroutineScope.launch {
             val buffer = ByteArray(4096)
             val packet = DatagramPacket(buffer, buffer.size)

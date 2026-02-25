@@ -118,11 +118,11 @@ Ensure your app has permission to run foreground services (especially on Android
 
 ## 🧠 Key Features
 
-- Automatic host discovery: uses **Intent** with action **dashingineering.jetour.tboxcore.HOST_SERVICE**.
+- Automatic host discovery: uses **`Intent`** with action **`dashingineering.jetour.tboxcore.HOST_SERVICE`**.
 - Seamless failover: if the host dies, any client can become the new host.
-- Raw data delivery: receives **ByteArray** — you control parsing logic.
+- Raw data delivery: receives **`ByteArray`** — you control parsing logic.
 - No UI dependencies: works in services, workers, or background tasks.
-- Self-contained: includes all protocol utilities (**fillHeader**, **xorSum**, etc.).
+- Self-contained: includes all protocol utilities (**`fillHeader`**, **`xorSum*`*, etc.).
 
 ---
 
@@ -142,7 +142,7 @@ fun buildVersionRequest(): ByteArray {
 }
 ```
 
-Utility functions like **fillHeader**, **xorSum**, and **extractData** are available in **dashingineering.jetour.tboxcore.util**.
+Utility functions like **`fillHeader`**, **`xorSum`**, and **`extractData`** are available in **`dashingineering.jetour.tboxcore.util`**.
 
 ---
 

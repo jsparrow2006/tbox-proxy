@@ -25,6 +25,7 @@ android {
     sourceSets {
         getByName("main").aidl.srcDir("src/main/aidl")
     }
+    compileSdkExtension = 11
 }
 
 dependencies {

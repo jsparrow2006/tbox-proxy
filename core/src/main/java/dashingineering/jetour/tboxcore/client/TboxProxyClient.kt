@@ -67,6 +67,7 @@ class TboxProxyClient(
 
         if (resolveInfo != null) {
             // Хост найден — просто подключаемся
+            callback?.onLogMessage("INFO", "HOST", "Хост AIDL найден ${resolveInfo.serviceInfo.packageName}:${resolveInfo.serviceInfo.name}")
             val componentName = ComponentName(
                 resolveInfo.serviceInfo.packageName,
                 resolveInfo.serviceInfo.name
@@ -79,6 +80,7 @@ class TboxProxyClient(
         }
 
         // Хоста нет — становимся хостом
+        callback?.onLogMessage("INFO", "HOST", "Хост AIDL в системе не найден, создаем хост")
         becomeHost()
     }
 

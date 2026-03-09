@@ -7,7 +7,7 @@
       </SelectionState>
       <SelectionState runConfigName="demo">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-03-09T11:43:28.135537Z">
+        <DropdownSelection timestamp="2026-03-09T16:24:42.078576Z">
           <Target type="DEFAULT_BOOT">
             <handle>
               <DeviceId pluginId="LocalEmulator" identifier="path=/Users/igaithuk/.android/avd/Jetour_Dashing.avd" />

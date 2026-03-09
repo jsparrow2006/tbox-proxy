@@ -52,10 +52,22 @@ class TboxProxyClient(
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            android.util.Log.d("TBoxProxyClient", "onServiceConnected")
             service = ITboxHostService.Stub.asInterface(binder)
             callback?.let { service?.registerCallback(it) }
-            // Инициируем подключение к TBox
-            service?.start(tBoxIp, tBoxPort)
+            
+            // Проверяем, запущен ли уже UDP хост
+            val isRunning = service?.isRunning() ?: false
+            android.util.Log.d("TBoxProxyClient", "UDP host isRunning: $isRunning")
+            
+            if (!isRunning) {
+                // Хост не запущен — инициируем подключение к TBox
+                android.util.Log.d("TBoxProxyClient", "Calling service.start($tBoxIp, $tBoxPort)")
+                service?.start(tBoxIp, tBoxPort)
+            } else {
+                android.util.Log.d("TBoxProxyClient", "UDP host already running")
+            }
+            
             isConnected = true
             onEvent(Event.HostConnected)
         }
@@ -78,21 +90,21 @@ class TboxProxyClient(
                 val resolveInfo = context.packageManager.resolveServiceInfo(intent)
 
                 if (resolveInfo != null) {
-                    // Хост найден — просто подключаемся
-                    callback?.onLogMessage("INFO", "HOST", "Хост AIDL найден: ${resolveInfo.serviceInfo.packageName}:${resolveInfo.serviceInfo.name}")
+                    // Хост найден в манифесте — пытаемся подключиться
                     val componentName = ComponentName(
                         resolveInfo.serviceInfo.packageName,
                         resolveInfo.serviceInfo.name
                     )
                     val bindIntent = Intent().apply { component = componentName }
+                    callback?.onLogMessage("INFO", "HOST", "Хост найден в системе: ${resolveInfo.serviceInfo.packageName}")
                     if (context.bindService(bindIntent, connection, Context.BIND_AUTO_CREATE)) {
                         isBound = true
                         return@launch
                     }
                 }
 
-                // Хоста нет — становимся хостом
-                callback?.onLogMessage("INFO", "HOST", "Хост AIDL в системе не найден, создаем хост")
+                // Хоста нет или не удалось подключиться — становимся хостом
+                callback?.onLogMessage("INFO", "HOST", "Хост не найден, создаём новый")
                 becomeHost()
             }
         }
@@ -127,12 +139,19 @@ class TboxProxyClient(
     }
 
     private suspend fun becomeHost() {
+        android.util.Log.d("TBoxProxyClient", "becomeHost() called")
+        callback?.onLogMessage("INFO", "HOST", "Trying become host")
         hostMutex.withLock {
-            if (isBecomingHost) return
+            if (isBecomingHost) {
+                android.util.Log.d("TBoxProxyClient", "becomeHost: already becoming host, returning")
+                return
+            }
             isBecomingHost = true
+            android.util.Log.d("TBoxProxyClient", "becomeHost: isBecomingHost set to true")
         }
 
         scope.launch {
+            android.util.Log.d("TBoxProxyClient", "becomeHost: launching coroutine scope")
             var attempts = 0
             val maxAttempts = 3
 
@@ -140,9 +159,11 @@ class TboxProxyClient(
                 try {
                     delay(Random.nextLong(100, 500))
                     attempts++
+                    android.util.Log.d("TBoxProxyClient", "becomeHost: attempt #$attempts")
 
                     // Запускаем встроенный сервис из библиотеки
                     val intent = Intent(context, TboxHostService::class.java)
+                    android.util.Log.d("TBoxProxyClient", "Starting TboxHostService...")
                     ContextCompat.startForegroundService(context, intent)
 
                     delay(800)
@@ -151,6 +172,7 @@ class TboxProxyClient(
                     val existingHost = findExistingHost()
                     if (existingHost != null) {
                         // Другой клиент стал хостом — подключаемся к нему
+                        android.util.Log.d("TBoxProxyClient", "Found existing host: ${existingHost.packageName}")
                         callback?.onLogMessage("INFO", "HOST", "Другой хост найден: ${existingHost.packageName}, подключаемся")
                         bindToHost(existingHost)
                         return@launch
@@ -159,24 +181,31 @@ class TboxProxyClient(
                     // Подключаемся к себе
                     val selfInfo = context.packageManager.resolveServiceInfo(intent)
                     if (selfInfo != null) {
+                        android.util.Log.d("TBoxProxyClient", "Service info found: ${selfInfo.serviceInfo.packageName}")
                         val componentName = ComponentName(
                             selfInfo.serviceInfo.packageName,
                             selfInfo.serviceInfo.name
                         )
                         val bindIntent = Intent().apply { component = componentName }
+                        android.util.Log.d("TBoxProxyClient", "Binding to service...")
                         if (context.bindService(bindIntent, connection, Context.BIND_AUTO_CREATE)) {
                             isBound = true
+                            android.util.Log.d("TBoxProxyClient", "Service bound successfully")
                             // Инициируем подключение к TBox
+                            android.util.Log.d("TBoxProxyClient", "Calling service.start($tBoxIp, $tBoxPort)")
                             service?.start(tBoxIp, tBoxPort)
                             callback?.onLogMessage("INFO", "HOST", "Успешно стали хостом с попытки #$attempts")
                             return@launch
                         } else {
+                            android.util.Log.d("TBoxProxyClient", "bindService returned false")
                             callback?.onLogMessage("WARN", "HOST", "Не удалось привязаться к сервису (попытка $attempts)")
                         }
                     } else {
+                        android.util.Log.d("TBoxProxyClient", "Service info not found after start")
                         callback?.onLogMessage("WARN", "HOST", "Сервис не найден после запуска (попытка $attempts)")
                     }
                 } catch (e: Exception) {
+                    android.util.Log.e("TBoxProxyClient", "Exception on attempt #$attempts: ${e.message}", e)
                     callback?.onLogMessage("ERROR", "HOST", "Ошибка при становлении хостом (попытка $attempts): ${e.message}")
                 }
 
@@ -185,6 +214,7 @@ class TboxProxyClient(
                 }
             }
 
+            android.util.Log.e("TBoxProxyClient", "Failed to become host after $maxAttempts attempts")
             onError("Failed to become host after $maxAttempts attempts")
             hostMutex.withLock {
                 isBecomingHost = false

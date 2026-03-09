@@ -66,13 +66,18 @@ class TboxHostService : Service() {
         }
 
         override fun start(ip: String, port: Int): Boolean {
+            android.util.Log.d("TBoxHostService", "start() called with ip=$ip, port=$port")
             return runBlocking {
                 hostMutex.withLock {
                     if (udpHost == null) {
+                        android.util.Log.d("TBoxHostService", "Creating new TboxUdpHost")
                         udpHost = TboxUdpHost(scope)
                         udpHost!!.addListener(hostListener)
                     }
-                    udpHost!!.start(ip, port)
+                    android.util.Log.d("TBoxHostService", "Starting UDP host...")
+                    val result = udpHost!!.start(ip, port)
+                    android.util.Log.d("TBoxHostService", "UDP host start result: $result")
+                    result
                 }
             }
         }

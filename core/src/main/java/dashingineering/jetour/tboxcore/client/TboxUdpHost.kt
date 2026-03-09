@@ -48,12 +48,11 @@ class TboxUdpHost(
                 address = InetAddress.getByName(actualIp)
                 remotePort = actualPort
                 _isRunning = true
-//                notifyListeners { onHostConnected() }
-                notifyListeners { onLog("INFO", "UDP", "Успешное подключение к $actualIp:$actualPort") }
+                notifyListeners { onLog("INFO", "UDP", "Сокет создан: $actualIp:$actualPort (UDP connectionless)") }
                 startListener()
                 true
             } catch (e: Exception) {
-                notifyListeners { onLog("ERROR", "UDP", "Ошибка подключения к $actualIp:$actualPort: ${e.message}") }
+                notifyListeners { onLog("ERROR", "UDP", "Ошибка создания сокета $actualIp:$actualPort: ${e.message}") }
                 _isRunning = false
                 false
             }

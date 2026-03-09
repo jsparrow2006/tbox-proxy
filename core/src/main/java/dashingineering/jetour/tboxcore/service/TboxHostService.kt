@@ -9,10 +9,13 @@ import dashingineering.jetour.tboxcore.ITboxHostService
 import dashingineering.jetour.tboxcore.client.TboxHostListener
 import dashingineering.jetour.tboxcore.client.TboxUdpHost
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class TboxHostService : Service() {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var udpHost: TboxUdpHost? = null
+    private val hostMutex = Mutex()
     private val callbackList = RemoteCallbackList<ITboxHostCallback>()
 
     private val hostListener = object : TboxHostListener {
@@ -37,8 +40,18 @@ class TboxHostService : Service() {
         val n = callbackList.beginBroadcast()
         repeat(n) {
             try {
-                block(callbackList.getBroadcastItem(it))
-            } catch (e: RemoteException) { /* ignore dead */ }
+                val callback = callbackList.getBroadcastItem(it)
+                // Выносим AIDL вызов в IO dispatcher с таймаутом для избежания блокировки
+                withContext(Dispatchers.IO) {
+                    withTimeoutOrNull(2000) {
+                        block(callback)
+                    }
+                }
+            } catch (e: RemoteException) {
+                // Dead callback — будет удалён при finishBroadcast
+            } catch (e: TimeoutCancellationException) {
+                // Callback слишком медленный — пропускаем
+            }
         }
         callbackList.finishBroadcast()
     }
@@ -54,30 +67,38 @@ class TboxHostService : Service() {
 
         override fun start(ip: String, port: Int): Boolean {
             return runBlocking {
-                if (udpHost == null) {
-                    udpHost = TboxUdpHost(scope)
-                    udpHost!!.addListener(hostListener)
+                hostMutex.withLock {
+                    if (udpHost == null) {
+                        udpHost = TboxUdpHost(scope)
+                        udpHost!!.addListener(hostListener)
+                    }
+                    udpHost!!.start(ip, port)
                 }
-                udpHost!!.start(ip, port)
             }
         }
 
         override fun stop() {
             runBlocking {
-                udpHost?.stop()
-                udpHost = null
+                hostMutex.withLock {
+                    udpHost?.stop()
+                    udpHost = null
+                }
             }
         }
 
         override fun sendCommand(cmd: ByteArray): Boolean {
             return runBlocking {
-                udpHost?.sendCommand(cmd) ?: false
+                hostMutex.withLock {
+                    udpHost?.sendCommand(cmd) ?: false
+                }
             }
         }
 
         override fun isRunning(): Boolean {
             return runBlocking {
-                udpHost?.isRunning ?: false
+                hostMutex.withLock {
+                    udpHost?.isRunning ?: false
+                }
             }
         }
 
@@ -113,11 +134,16 @@ class TboxHostService : Service() {
     }
 
     override fun onDestroy() {
-        scope.launch {
-            udpHost?.stop()
-            udpHost = null
+        // Сначала останавливаем UDP хост синхронно, чтобы избежать утечки сокета
+        runBlocking {
+            hostMutex.withLock {
+                udpHost?.stop()
+                udpHost = null
+            }
         }
+        // Затем отменяем scope
         scope.cancel()
+        callbackList.kill()
         super.onDestroy()
     }
 }

@@ -14,12 +14,14 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.dashing.tbox.proxy.demo.R
 import dashingineering.jetour.tboxcore.client.TboxProxyClient
+import dashingineering.jetour.tboxcore.util.buildTboxPacket
 
 class MainActivity : AppCompatActivity() {
     private lateinit var client: TboxProxyClient
     private lateinit var adapter: PacketAdapter
     private lateinit var recyclerView: RecyclerView
     private lateinit var tboxClient: TboxProxyClient
+    private var isConected: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,14 +41,14 @@ class MainActivity : AppCompatActivity() {
             when (event) {
                 is TboxProxyClient.Event.HostConnected -> {
                     adapter.addPacket(ITBoxMessage("📡", "Подключились к хосту"))
-                    // Можно отправить команду
-//                    sendVersionRequest()
                     val hostname = tboxClient.getHostPackageName()
                     hVersion.text = hostname
+                    isConected = true;
+                    connectButton.setText("Отключиться от T-BOX")
+                    //Запрос на получение кан данных
+                    tboxClient.sendCommand(buildTboxPacket(0x23.toByte(), 0x80.toByte(), 0x15, byteArrayOf(0x01, 0x02)))
                 }
                 is TboxProxyClient.Event.DataReceived -> {
-                    // Получили сырые данные от TBox
-//                    handleRawData(event.data)
                     adapter.addPacket(ITBoxMessage("📥", event.data.toString()))
                 }
                 is TboxProxyClient.Event.LogMessage -> {
@@ -58,59 +60,21 @@ class MainActivity : AppCompatActivity() {
                     adapter.addPacket(ITBoxMessage("📡", "Хост умер — клиент сам станет хостом"))
                 }
 
-                TboxProxyClient.Event.HostDisconnected -> TODO()
+                TboxProxyClient.Event.HostDisconnected -> {
+                    connectButton.setText("Подключиться к T-BOX")
+                    isConected = false
+                }
             }
         }
 
-//            val client = TBoxClient("192.168.225.1", 60000, object : TBoxClient.OnMessage {
-////            val client = TBoxClient("192.168.225.1", 60001, object : TBoxClient.OnMessage {
-//
-//                override fun onVersionReceived(hVer: String, sVer: String) {
-//                    runOnUiThread {
-//                        sVersion.text = sVer
-//                        hVersion.text = hVer
-//                    }
-//                }
-//
-//                override fun onRAWPacketReceived(packetInfo: ITBoxMessage) {
-//                    runOnUiThread {
-//                        adapter.addPacket(packetInfo)
-//                    }
-//                }
-//
-//                override fun onCanPacketReceived(packetInfo: ITBoxMessage) {
-//                    runOnUiThread {
-//                        adapter.addPacket(packetInfo)
-//                    }
-//                }
-//
-//                override fun onError(packetInfo: ITBoxMessage) {
-//                    runOnUiThread {
-//                        adapter.addPacket(packetInfo)
-//                    }
-//                }
-//
-//                override fun onConnect(isConnect: Boolean) {
-//                    Log.d("TBoxClient", "Is Connected $isConnect")
-//                    if (isConnect) {
-//                        connectButton.text = "Отключиться от TBox"
-//                        connectButton.setBackgroundColor(Color.RED)
-//                    } else {
-//                        connectButton.text = "Подключиться к TBox"
-//                        connectButton.setBackgroundColor(Color.rgb(108, 92, 172))
-////                        adapter.clear()
-//                    }
-//                }
-//            })
-
         connectButton.setOnClickListener {
-            adapter.addPacket(ITBoxMessage("📡", "Подключаемся к хосту"))
-            tboxClient.connect()
-//            if(client.isConnected()) {
-//                client.disconnect()
-//            } else {
-//                client.connect()
-//            }
+            if(isConected) {
+                adapter.addPacket(ITBoxMessage("📡", "Отключаемся от хоста"))
+                tboxClient.disconnect()
+            } else {
+                adapter.addPacket(ITBoxMessage("📡", "Подключаемся к хосту"))
+                tboxClient.connect()
+            }
         }
 
 //        saveButton.setOnClickListener {
@@ -129,6 +93,5 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         tboxClient.disconnect()
-//        client.disconnect()
     }
 }

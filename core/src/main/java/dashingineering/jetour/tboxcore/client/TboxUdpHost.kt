@@ -1,5 +1,8 @@
 package dashingineering.jetour.tboxcore.client
 
+import android.os.RemoteException
+import android.util.Log
+import dashingineering.jetour.tboxcore.ITboxHostCallback
 import dashingineering.jetour.tboxcore.util.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -12,7 +15,7 @@ class TboxUdpHost(
     private val coroutineScope: CoroutineScope,
     private val defaultIp: String = "192.168.225.1",
     private val defaultPort: Int = 50047,
-    private val listeners: MutableList<TboxHostListener> = mutableListOf()
+    private val listeners: MutableList<TboxHostListener> = mutableListOf(),
 ) {
     private var socket: DatagramSocket? = null
     private var address: InetAddress? = null
@@ -35,50 +38,60 @@ class TboxUdpHost(
         val actualIp = ip ?: defaultIp
         val actualPort = port ?: defaultPort
 
-        if (_isRunning) return true
-        return try {
-            socket = DatagramSocket().apply { soTimeout = 1000 }
-            address = InetAddress.getByName(actualIp)
-            remotePort = actualPort
-            _isRunning = true
-            notifyListeners { onHostConnected() }
-            startListener()
-            true
-        } catch (e: Exception) {
-            log("ERROR", "UDP", "Start failed: ${e.message}")
-            _isRunning = false
-            false
+        return mutex.withLock {
+            if (_isRunning) {
+                notifyListeners { onLog("INFO", "UDP", "Хост уже запущен, подключение не требуется") }
+                return@withLock true
+            }
+            return@withLock try {
+                socket = DatagramSocket().apply { soTimeout = 200 }
+                address = InetAddress.getByName(actualIp)
+                remotePort = actualPort
+                _isRunning = true
+//                notifyListeners { onHostConnected() }
+                notifyListeners { onLog("INFO", "UDP", "Успешное подключение к $actualIp:$actualPort") }
+                startListener()
+                true
+            } catch (e: Exception) {
+                notifyListeners { onLog("ERROR", "UDP", "Ошибка подключения к $actualIp:$actualPort: ${e.message}") }
+                _isRunning = false
+                false
+            }
         }
     }
 
     suspend fun stop() {
-        if (!_isRunning) return
-        listenJob?.cancel()
-        listenJob = null
-        socket?.close()
-        socket = null
-        address = null
-        remotePort = -1
-        _isRunning = false
-        notifyListeners { onHostDisconnected() }
+        mutex.withLock {
+            if (!_isRunning) return@withLock
+            listenJob?.cancel()
+            listenJob = null
+            socket?.close()
+            socket = null
+            address = null
+            remotePort = -1
+            _isRunning = false
+            notifyListeners { onHostDisconnected() }
+        }
     }
 
     suspend fun sendCommand(command: ByteArray): Boolean {
         if (!_isRunning || socket == null || address == null || remotePort == -1) return false
         return try {
             // Используем remotePort вместо socket.localPort
+            notifyListeners { onLog("INFO", "UDP", "Sending packet $command") }
             val packet = DatagramPacket(command, command.size, address, remotePort)
             mutex.withLock {
                 socket!!.send(packet)
             }
             true
         } catch (e: Exception) {
+            notifyListeners { onLog("ERROR", "UDP", "Send failed: ${e.message}") }
             log("ERROR", "UDP", "Send failed: ${e.message}")
             false
         }
     }
 
-    private fun startListener() {  // Убираем параметр port
+    private fun startListener() {
         listenJob = coroutineScope.launch {
             val buffer = ByteArray(4096)
             val packet = DatagramPacket(buffer, buffer.size)
@@ -96,9 +109,8 @@ class TboxUdpHost(
                         }
                     }
                 } catch (ignored: Exception) {
-                    // timeout or closed
+                    // timeout or closed — soTimeout = 200ms, поэтому не блокируем надолго
                 }
-                delay(100)
             }
         }
     }

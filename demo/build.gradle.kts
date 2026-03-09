@@ -8,11 +8,24 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.dashing.tbox.proxy.demo"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+    }
+
+    flavorDimensions += "app"
+    productFlavors {
+        create("demo1") {
+            dimension = "app"
+            applicationId = "com.dashing.tbox.proxy.demo"
+            resValue("string", "app_name", "TBox Demo")
+        }
+        create("demo2") {
+            dimension = "app"
+            applicationId = "com.dashing.tbox.proxy.demo2"
+            resValue("string", "app_name", "TBox Demo2")
+        }
     }
 
     compileOptions {

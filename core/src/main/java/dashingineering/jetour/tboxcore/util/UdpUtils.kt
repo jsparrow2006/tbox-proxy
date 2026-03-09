@@ -44,3 +44,19 @@ fun extractData(data: ByteArray, length: Int): ByteArray {
     val checksum = xorSum(data.copyOfRange(0, 13 + length))
     return if (checksum == data[13 + length]) payload else ByteArray(0)
 }
+
+/**
+ * Конструктор UDP-пакета TBox
+ *
+ * @param tid Transaction ID
+ * @param sid Service ID
+ * @param cmd Command/Parameter byte
+ * @param data Полезная нагрузка (payload)
+ * @return Полный пакет с заголовком и контрольной суммой
+ */
+fun buildTboxPacket(tid: Byte, sid: Byte, cmd: Byte, data: ByteArray): ByteArray {
+    val header = fillHeader(data.size, tid, sid, cmd)
+    val fullData = header + data
+    val checksum = xorSum(fullData)
+    return fullData + checksum
+}

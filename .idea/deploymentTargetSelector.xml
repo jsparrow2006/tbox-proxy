@@ -7,10 +7,10 @@
       </SelectionState>
       <SelectionState runConfigName="demo">
         <option name="selectionMode" value="DROPDOWN" />
-        <DropdownSelection timestamp="2026-03-01T15:52:53.972851Z">
+        <DropdownSelection timestamp="2026-03-09T11:43:28.135537Z">
           <Target type="DEFAULT_BOOT">
             <handle>
-              <DeviceId pluginId="LocalEmulator" identifier="path=/Volumes/Sparrow/AndroidSdk/AVD/Pixel_Tablet.avd" />
+              <DeviceId pluginId="LocalEmulator" identifier="path=/Users/igaithuk/.android/avd/Jetour_Dashing.avd" />
             </handle>
           </Target>
         </DropdownSelection>

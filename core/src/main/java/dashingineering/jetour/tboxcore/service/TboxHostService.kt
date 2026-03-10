@@ -6,6 +6,7 @@ import android.os.*
 import androidx.core.app.NotificationCompat
 import dashingineering.jetour.tboxcore.ITboxHostCallback
 import dashingineering.jetour.tboxcore.ITboxHostService
+import dashingineering.jetour.tboxcore.client.TboxBroadcastCoordinator
 import dashingineering.jetour.tboxcore.client.TboxHostListener
 import dashingineering.jetour.tboxcore.client.TboxUdpHost
 import kotlinx.coroutines.*
@@ -17,22 +18,29 @@ class TboxHostService : Service() {
     private var udpHost: TboxUdpHost? = null
     private val hostMutex = Mutex()
     private val callbackList = RemoteCallbackList<ITboxHostCallback>()
+    private var coordinator: TboxBroadcastCoordinator? = null
 
     private val hostListener = object : TboxHostListener {
         override suspend fun onDataReceived(data: ByteArray) {
             notifyCallbacks { onDataReceived(data) }
+            // Транслируем данные через broadcast другим приложениям
+            coordinator?.broadcastDataReceived(data)
         }
 
         override suspend fun onLog(level: String, tag: String, message: String) {
             notifyCallbacks { onLogMessage(level, tag, message) }
+            // Транслируем лог через broadcast
+            coordinator?.broadcastLog(level, tag, message)
         }
 
         override suspend fun onHostConnected() {
             notifyCallbacks { onHostConnected() }
+            coordinator?.broadcastLog("INFO", "HOST", "Хост подключён")
         }
 
         override suspend fun onHostDisconnected() {
             notifyCallbacks { onHostDisconnected() }
+            coordinator?.broadcastLog("INFO", "HOST", "Хост отключён")
         }
     }
 

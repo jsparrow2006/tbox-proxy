@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_CONNECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <application>
+        <!-- Старый AIDL сервис -->
         <service
             android:name="dashingineering.jetour.tboxcore.service.TboxHostService"
             android:enabled="true"
@@ -14,5 +15,12 @@
                 <action android:name="dashingineering.jetour.tboxcore.HOST_SERVICE" />
             </intent-filter>
         </service>
+        
+        <!-- Новый Broadcast сервис -->
+        <service
+            android:name="dashingineering.jetour.tboxcore.service.TboxBroadcastHostService"
+            android:enabled="true"
+            android:exported="true"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

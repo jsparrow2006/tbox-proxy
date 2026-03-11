@@ -10,7 +10,6 @@ A Kotlin/Android library that enables **safe, concurrent access to a single TBox
 
 This library provides:
 - A **single foreground service** (`TboxHostService`) that owns the UDP socket.
-- An **AIDL interface** for inter-process communication (IPC).
 - **Automatic host election**: any client can become the host if none exists.
 - **Zero boilerplate**: no need to write your own service or manage sockets.
 
@@ -36,6 +35,15 @@ dependencyResolutionManagement {
 ```kotlin
 // build.gradle.kts
 dependencies {
+    implementation("com.github.jsparrow2006:tbox-proxy:latest")
+}
+```
+
+Or other versions
+
+```kotlin
+// build.gradle.kts
+dependencies {
     implementation("com.github.jsparrow2006:tbox-proxy:1.0.0")
 }
 ```
@@ -49,57 +57,88 @@ dependencies {
 ### 1. Create a client instance
 
 ```kotlin
-val client = TboxProxyClient(
-    context = this,
-    defaultIp = "192.168.225.1", // optional
-    defaultPort = 50047           // optional
+val client = TBoxClient(
+    context = applicationContext,
+    callback = myCallback
 )
 ```
+
+Or with custom parameters
+
+```kotlin
+val client = TBoxClient(
+    context = applicationContext,
+    localPort = 11048,
+    remotePort = 50047,
+    remoteAddress = "192.168.225.1",
+    tcpPort = 1104,
+    callback = myCallback
+)
+```
+
 
 ### 2. Set up event handlers
 
 ```kotlin
-client.onEvent = { event ->
-    when (event) {
-        is TboxProxyClient.Event.HostConnected -> {
-            Log.i("TBox", "Connected to host")
+val client = TBoxClient(
+    context = applicationContext,
+    callback = object : TBoxClientCallback {
+        override fun onDataReceived(data: ByteArray) {
+            //Get received data from T-Box
+            //For to get raw ByteArray for logging
+            //data.toLogString(0) without lenth limin
+            //data.toLogString(100) with lenth limin
         }
-        is TboxProxyClient.Event.DataReceived -> {
-            // Handle raw TBox response (ByteArray)
-            parseTboxData(event.data)
+
+        override fun onLogMessage(type: LogType, tag: String, message: String) {
+            //Get internal library log messages
         }
-        is TboxProxyClient.Event.LogMessage -> {
-            Log.d("TBoxLog", "[${event.tag}] ${event.message}")
-        }
-        is TboxProxyClient.Event.HostDied -> {
-            // Host crashed — client will auto-attempt to become new host
-            Log.w("TBox", "Host died, attempting takeover...")
+
+        override fun onConnectionChanged(connected: Boolean) {
+            //Get connection library status
         }
     }
-}
+)
 ```
 
 ### 3. Connect and start receiving data
 
 ```kotlin
-client.connect()
+client.initialize()
 ```
 
-🔁 On first launch (no host running), the library automatically starts its own TboxHostService and connects to the TBox using the provided IP/port.
+🔁 On first launch (no host running), the library automatically starts its own service and connects to the TBox using the provided IP/port.
 🔁 Subsequent apps simply subscribe to the existing host.
 
 ### 4. Send commands to TBox
 
+1. send raw ByteArray command
 ```kotlin
-val command = buildCommand(...) // your custom command builder
-client.sendCommand(command)
+client.sendRawMessage(...you-byte-array)
+```
+
+2. send parameters command
+```kotlin
+client.sendCommand(TBoxConstants.CRT_CODE, TBoxConstants.GATE_CODE, 0x15, byteArrayOf(0x01, 0x02))
+```
+
+2. send command with object command
+```kotlin
+val getCanFrames = TBoxCommand(
+    tid = TBoxConstants.CRT_CODE,
+    sid = TBoxConstants.GATE_CODE,
+    cmd = 0x15,
+    data = byteArrayOf(0x01, 0x02)
+)
+
+client.sendCommand(getCanFrames)
 ```
 
 ### 5. Clean up
 
 ```kotlin
 override fun onDestroy() {
-    client.disconnect()
+    tboxClient.destroy()
     super.onDestroy()
 }
 ```
@@ -118,29 +157,12 @@ Ensure your app has permission to run foreground services (especially on Android
 
 ## 🧠 Key Features
 
-- Automatic host discovery: uses **`Intent`** with action **`dashingineering.jetour.tboxcore.HOST_SERVICE`**.
 - Seamless failover: if the host dies, any client can become the new host.
 - Raw data delivery: receives **`ByteArray`** — you control parsing logic.
 - No UI dependencies: works in services, workers, or background tasks.
 - Self-contained: includes all protocol utilities (**`fillHeader`**, **`xorSum*`*, etc.).
 
 ---
-
-## 🛠 Example: Building a Command
-
-```kotlin
-fun buildVersionRequest(): ByteArray {
-    val tid = 0x25 // MDC_CODE
-    val sid = 0x50 // SELF_CODE
-    val cmd = 0x01 // get version
-    val payload = byteArrayOf(0x00, 0x00)
-
-    val header = fillHeader(payload.size, tid.toByte(), sid.toByte(), cmd.toByte())
-    val withPayload = header + payload
-    val checksum = xorSum(withPayload)
-    return withPayload + checksum
-}
-```
 
 Utility functions like **`fillHeader`**, **`xorSum`**, and **`extractData`** are available in **`dashingineering.jetour.tboxcore.util`**.
 

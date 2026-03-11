@@ -6,23 +6,26 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/recyclerView"
-        android:layout_width="match_parent"
-        android:layout_height="600dp" />
-
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="50dp"
+        android:layout_gravity="bottom"
         android:layout_margin="10dp"
         android:orientation="horizontal">
 
         <Button
             android:id="@+id/btnConnect"
-            android:layout_width="216dp"
+            android:layout_width="250dp"
             android:layout_height="wrap_content"
             android:backgroundTint="#6C5CAC"
             android:text="Подключиться к T-Box" />
+
+        <Button
+            android:id="@+id/saveLogs"
+            android:layout_width="250dp"
+            android:layout_height="wrap_content"
+            android:backgroundTint="#6C5CAC"
+            android:text="Сохранить логи" />
 
         <Space
             android:layout_width="wrap_content"
@@ -44,5 +47,18 @@
             android:layout_weight="1" />
 
     </LinearLayout>
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_weight="1">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_weight="1" />
+
+    </FrameLayout>
 
 </LinearLayout>

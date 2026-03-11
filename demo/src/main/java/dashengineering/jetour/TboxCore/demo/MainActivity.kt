@@ -15,6 +15,7 @@ import com.dashing.tbox.proxy.demo.R
 import dashingineering.jetour.tboxcore.LogType
 import dashingineering.jetour.tboxcore.TBoxClient
 import dashingineering.jetour.tboxcore.TBoxClientCallback
+import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
 
 class MainActivity : AppCompatActivity() {
     private lateinit var adapter: PacketAdapter
@@ -32,12 +33,13 @@ class MainActivity : AppCompatActivity() {
         recyclerView.adapter = adapter
         val hVersion = findViewById<TextView>(R.id.hVer)
         val connectButton = findViewById<Button>(R.id.btnConnect)
+        val saveLogButton = findViewById<Button>(R.id.saveLogs)
 
         tboxClient = TBoxClient(
             context = applicationContext,
             callback = object : TBoxClientCallback {
                 override fun onDataReceived(data: ByteArray) {
-                    adapter.addPacket(ITBoxMessage("📥", data.toString()))
+                    adapter.addPacket(ITBoxMessage("📥", data.toLogString()))
                 }
 
                 override fun onLogMessage(type: LogType, tag: String, message: String) {
@@ -57,6 +59,11 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+
+        saveLogButton.setOnClickListener {
+            adapter.saveToFile(applicationContext, )
+        }
+
 
         connectButton.setOnClickListener {
             if(tboxClient.isConnected()) {

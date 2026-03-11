@@ -214,13 +214,14 @@ class TBoxClient(
     /**
      * Внутренний метод: отправка команды локальному сервису
      */
-    private fun sendViaService(data: ByteArray) {
+    private fun sendViaService( data: ByteArray) {
         val intent = Intent(TBoxBridgeService.ACTION_SEND).apply {
             setPackage(context.packageName)
-            putExtra("data", data)
+            putExtra(TBoxBridgeService.EXTRA_DATA, data)  // 🔧 Используйте константу
         }
-        // Отправляем с разрешением для безопасности
         context.sendBroadcast(intent, "dashingineering.jetour.tboxcore.PERMISSION_TBOX")
+
+        log(LogType.DEBUG, "TBoxClient", "→ Sent broadcast command: ${data.toLogString()} (${data.size} bytes)")
     }
 
     /**

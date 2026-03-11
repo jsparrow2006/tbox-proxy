@@ -52,16 +52,15 @@ class PacketAdapter(private val recyclerView: RecyclerView) : RecyclerView.Adapt
         recyclerView.smoothScrollToPosition(position)
     }
 
-    private fun getDateFromTimeStamp(timeStamp: Long): String {
-        return SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(Date(timeStamp))
+    private fun getDateFromTimeStamp(timeStamp: Long, pattern: String = "HH:mm:ss.SSS"): String {
+        return SimpleDateFormat(pattern, Locale.getDefault()).format(Date(timeStamp))
     }
 
     fun clear() {
         packets.clear()
     }
 
-    fun saveToFile(context: Context, filename: String = "tbox_log_${getDateFromTimeStamp(System.currentTimeMillis())}.txt") {
-//        fun saveToDownloads(context: Context, filename: String = "tbox_messages.txt") {
+    fun saveToFile(context: Context, filename: String = "tbox_log_${getDateFromTimeStamp(System.currentTimeMillis(), "dd.MM.yyy_HH.mm.ss")}.txt") {
             val lines = packets.map { "${getDateFromTimeStamp(it.time)} | ${it.type} | ${it.message}" }
             val text = lines.joinToString("\n")
 

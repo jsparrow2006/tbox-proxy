@@ -1,16 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Сетевые разрешения -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Foreground Service -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+
+
+    <!-- Кастомное разрешение для межприложенного взаимодействия -->
+    <permission
+        android:name="dashingineering.jetour.tboxcore.PERMISSION_TBOX"
+        android:protectionLevel="normal" />
+    <uses-permission android:name="dashingineering.jetour.tboxcore.PERMISSION_TBOX" />
+
     <application>
+
         <service
-            android:name="dashingineering.jetour.tboxcore.service.TboxHostService"
+            android:name=".service.TBoxBridgeService"
             android:enabled="true"
             android:exported="true"
-            android:foregroundServiceType="dataSync">
+            android:permission="dashingineering.jetour.tboxcore.PERMISSION_TBOX"
+            android:foregroundServiceType="specialUse"
+            tools:ignore="ForegroundServicePermission"
+            android:stopWithTask="false">
+
             <intent-filter>
-                <action android:name="dashingineering.jetour.tboxcore.HOST_SERVICE" />
+                <action android:name="dashingineering.jetour.tboxcore.service.START" />
+                <action android:name="dashingineering.jetour.tboxcore.ACTION_SEND" />
             </intent-filter>
+
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="tcp_udp_bridge" />
         </service>
+
     </application>
 </manifest>

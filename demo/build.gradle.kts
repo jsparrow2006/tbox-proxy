@@ -8,11 +8,24 @@ android {
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.dashing.tbox.proxy.demo"
         minSdk = 24
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
+    }
+
+    flavorDimensions += "app"
+    productFlavors {
+        create("demo1") {
+            dimension = "app"
+            applicationId = "com.dashing.tbox.proxy.demo"
+            resValue("string", "app_name", "TBox Demo")
+        }
+        create("demo2") {
+            dimension = "app"
+            applicationId = "com.dashing.tbox.proxy.demo2"
+            resValue("string", "app_name", "TBox Demo2")
+        }
     }
 
     compileOptions {
@@ -25,19 +38,19 @@ android {
     }
 
     buildFeatures {
-        // Отключи Compose
         compose = false
     }
+    compileSdkExtension = 11
 }
 
 dependencies {
-    // Базовые зависимости без Compose
     implementation("androidx.core:core-ktx:1.10.0")
-    implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.activity:activity-ktx:1.9.3")
-    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    implementation(libs.androidx.appcompat)
+    implementation(libs.material)
+    implementation("androidx.activity:activity:1.7.0")
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
     implementation(project(":core"))
 }

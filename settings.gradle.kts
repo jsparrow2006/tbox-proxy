@@ -19,6 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Tbox-proxy-lib"
+rootProject.name = "TBoxCore"
 include(":core")
 include(":demo")

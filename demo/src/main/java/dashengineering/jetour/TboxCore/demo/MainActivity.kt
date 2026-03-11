@@ -1,82 +1,111 @@
 package dashengineering.jetour.TboxCore.demo
 
-import android.annotation.SuppressLint
-import android.os.Build
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Bundle
-import android.util.Log
-import androidx.annotation.RequiresApi
+import android.os.Handler
+import android.os.Looper
+import android.widget.Button
+import android.widget.TextView
+import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import com.dashing.tbox.proxy.demo.R
-import dashingineering.jetour.tboxcore.client.TboxProxyClient
-import dashingineering.jetour.tboxcore.util.fillHeader
-import dashingineering.jetour.tboxcore.util.xorSum
+import dashingineering.jetour.tboxcore.types.LogType
+import dashingineering.jetour.tboxcore.TBoxClient
+import dashingineering.jetour.tboxcore.constants.TBoxConstants
+import dashingineering.jetour.tboxcore.types.TBoxClientCallback
+import dashingineering.jetour.tboxcore.types.TBoxCommand
+import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
+
+val getCanFrames = TBoxCommand(
+    tid = TBoxConstants.CRT_CODE,
+    sid = TBoxConstants.GATE_CODE,
+    cmd = 0x15,
+    data = byteArrayOf(0x01, 0x02)
+)
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var tboxClient: TboxProxyClient
+    private lateinit var adapter: PacketAdapter
+    private lateinit var recyclerView: RecyclerView
+    private lateinit var tboxClient: TBoxClient
 
-    @RequiresApi(Build.VERSION_CODES.O)
-    @SuppressLint("MissingInflatedId")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContentView(R.layout.activity_launcher)
 
-        tboxClient = TboxProxyClient(this);
-        tboxClient.onEvent = { event ->
-            when (event) {
-                is TboxProxyClient.Event.HostConnected -> {
-                    Log.i("TBox", "Подключились к хосту")
-                    // Можно отправить команду
-                    sendVersionRequest()
-                    tboxClient.getHostPackageName()
-                }
-                is TboxProxyClient.Event.DataReceived -> {
-                    // Получили сырые данные от TBox
-                    handleRawData(event.data)
-                }
-                is TboxProxyClient.Event.LogMessage -> {
-                    Log.d("TBoxLog", "[${event.tag}] ${event.message}")
-                }
-                is TboxProxyClient.Event.HostDied -> {
-                    Log.w("TBox", "Хост умер — клиент сам станет хостом")
+        recyclerView = findViewById(R.id.recyclerView)
+        recyclerView.layoutManager = LinearLayoutManager(this)
+        adapter = PacketAdapter(recyclerView)
+        recyclerView.adapter = adapter
+        val hVersion = findViewById<TextView>(R.id.hVer)
+        val connectButton = findViewById<Button>(R.id.btnConnect)
+        val saveLogButton = findViewById<Button>(R.id.saveLogs)
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            != PackageManager.PERMISSION_GRANTED) {
+
+            // Если разрешения нет — запрашиваем (в Activity)
+            ActivityCompat.requestPermissions(
+                this@MainActivity,
+                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                100
+            )
+        }
+
+        tboxClient = TBoxClient(
+            context = applicationContext,
+            callback = object : TBoxClientCallback {
+                override fun onDataReceived(data: ByteArray) {
+                    //Get received data from T-Box
+                    //For to get raw ByteArray for logging data.toLogString(0)
+                    adapter.addPacket(ITBoxMessage("📥", data.toLogString(0)))
                 }
 
-                TboxProxyClient.Event.HostDisconnected -> TODO()
+                override fun onLogMessage(type: LogType, tag: String, message: String) {
+                    //Get internal library log messages
+                    adapter.addPacket(ITBoxMessage("📡 ${type}", "[${tag}] ${message}"))
+                }
+
+                override fun onConnectionChanged(connected: Boolean) {
+                    //Get connection library status
+                    if (connected) {
+                        connectButton.setText("Отключиться от T-BOX")
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            adapter.addPacket(ITBoxMessage("📡", "Отправляем запрос на получение CAN данных"))
+                            tboxClient.sendCommand(0x23.toByte(), 0x80.toByte(), 0x15, byteArrayOf(0x01, 0x02))
+                            tboxClient.sendCommand(getCanFrames)
+                        }, 3000)
+                    } else {
+                        connectButton.setText("Подключиться к T-BOX")
+                    }
+                }
+            }
+        )
+
+        saveLogButton.setOnClickListener {
+            adapter.saveToFile(applicationContext, )
+        }
+
+
+        connectButton.setOnClickListener {
+            if(tboxClient.isConnected()) {
+                adapter.addPacket(ITBoxMessage("📡", "Отключаемся от тбокса"))
+                tboxClient.destroy()
+            } else {
+                adapter.addPacket(ITBoxMessage("📡", "Подключаемся к тбоксу"))
+                tboxClient.initialize()
             }
         }
-        tboxClient.connect()
     }
 
     override fun onDestroy() {
-        tboxClient.disconnect()
         super.onDestroy()
-    }
-
-    private fun sendVersionRequest() {
-        val cmd = buildCommand(
-            tid = 0x25, // MDC_CODE
-            sid = 0x50, // SELF_CODE
-            param = 0x01, // get version
-            payload = byteArrayOf(0x00, 0x00)
-        )
-        tboxClient.sendCommand(cmd)
-    }
-
-    @OptIn(ExperimentalStdlibApi::class)
-    private fun handleRawData(data: ByteArray) {
-        // Парси как хочешь!
-        // Например, определи TID и CMD:
-        if (data.size >= 14) {
-            val tid = data[9]
-            val cmd = data[12]
-            Log.d("TBox", "TID=0x${tid.toHexString()}, CMD=0x${cmd.toHexString()}")
-            // Дальше — твой парсер
-        }
-    }
-
-    private fun buildCommand(tid: Int, sid: Int, param: Int, payload: ByteArray): ByteArray {
-        val header = fillHeader(payload.size, tid.toByte(), sid.toByte(), param.toByte())
-        val withPayload = header + payload
-        val checksum = xorSum(withPayload)
-        return withPayload + checksum
     }
 }

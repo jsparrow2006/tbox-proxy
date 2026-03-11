@@ -1,7 +1,7 @@
 package dashingineering.jetour.tboxcore.udp
 
-import dashingineering.jetour.tboxcore.LogType
-import dashingineering.jetour.tboxcore.TBoxClientCallback
+import dashingineering.jetour.tboxcore.types.LogType
+import dashingineering.jetour.tboxcore.types.TBoxClientCallback
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
 import kotlinx.coroutines.*
 import java.net.DatagramPacket
@@ -10,10 +10,6 @@ import java.net.InetAddress
 import java.net.SocketException
 import java.net.SocketTimeoutException
 
-/**
- * Простой UDP-менеджер для работы с сырыми ByteArray
- * Без парсинга протокола — вся логика на стороне клиента
- */
 class UdpSocketManager(
     private val localPort: Int,
     private val remotePort: Int,
@@ -28,10 +24,6 @@ class UdpSocketManager(
     private val log: (LogType, String, String) -> Unit = { type, tag, msg ->
         callback.onLogMessage(type, tag, msg)
     }
-
-    /**
-     * Инициализация сокета
-     */
 
     fun initialize(): Boolean {
         return try {
@@ -54,28 +46,13 @@ class UdpSocketManager(
         } as Boolean
     }
 
-//    fun initialize(): Boolean {
-//        return try {
-//            socket = DatagramSocket(localPort).apply {
-//                soTimeout = 1000 // 1 секунда таймаут для receive
-//                reuseAddress = true
-//            }
-//            log(LogType.INFO, "UdpSocketManager", "Initialized on port $localPort")
-//            true
-//        } catch (e: SocketException) {
-//            log(LogType.ERROR, "UdpSocketManager", "Failed to bind port $localPort: ${e.message}")
-//            false
-//        }
-//    }
-
-    /**
-     * Запуск цикла приёма
-     */
     fun startReceiving() {
         if (isReceiving) return
         isReceiving = true
 
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+        callback.onLogMessage(LogType.INFO, "UdpSocketManager", "Starting receive loop on port $localPort")
 
         scope?.launch {
             val buffer = ByteArray(4096) // Буфер под ваши пакеты
@@ -85,7 +62,6 @@ class UdpSocketManager(
                     val packet = DatagramPacket(buffer, buffer.size)
                     socket?.receive(packet)
 
-                    // Копируем полученные данные (важно: packet.length может быть меньше buffer.size)
                     val data = packet.data.copyOfRange(packet.offset, packet.offset + packet.length)
 
                     callback.onLogMessage(
@@ -94,7 +70,6 @@ class UdpSocketManager(
                         "← UDP received ${data.size} bytes from ${packet.address}:${packet.port}: ${data.toLogString()}"
                     )
 
-                    // Передаём в коллбэк без изменений
                     callback.onDataReceived(data)
 
                 } catch (e: SocketTimeoutException) {
@@ -109,11 +84,6 @@ class UdpSocketManager(
         }
     }
 
-    /**
-     * Отправка сырых данных
-     * @param data байты для отправки (клиент сам формирует пакет)
-     * @return успешность отправки
-     */
     suspend fun send(data: ByteArray): Boolean {
         val sock = socket ?: return false
 
@@ -135,9 +105,6 @@ class UdpSocketManager(
         }
     }
 
-    /**
-     * Остановка и очистка
-     */
     fun shutdown() {
         isReceiving = false
         scope?.cancel()
@@ -146,8 +113,5 @@ class UdpSocketManager(
         log(LogType.INFO, "UdpSocketManager", "Shutdown complete")
     }
 
-    /**
-     * Проверка активности
-     */
     fun isRunning(): Boolean = socket?.isClosed == false && isReceiving
 }

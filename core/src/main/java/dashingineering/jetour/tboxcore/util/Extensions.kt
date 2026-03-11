@@ -5,9 +5,6 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.content.ContextCompat
 
-/**
- * Безопасный запуск Foreground Service
- */
 fun Context.startForegroundServiceCompat(intent: Intent) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         ContextCompat.startForegroundService(this, intent)
@@ -16,14 +13,8 @@ fun Context.startForegroundServiceCompat(intent: Intent) {
     }
 }
 
-/**
- * Конвертация ByteArray в hex-строку для отладки
- */
 fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
-/**
- * Конвертация hex-строки в ByteArray
- */
 fun String.fromHex(): ByteArray {
     require(length % 2 == 0) { "Hex string must have even length" }
     return ByteArray(length / 2) { i ->

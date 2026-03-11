@@ -1,10 +1,10 @@
-// tcp/TcpServer.kt
 package dashingineering.jetour.tboxcore.tcp
 
-import dashingineering.jetour.tboxcore.LogType
-import dashingineering.jetour.tboxcore.TBoxClientCallback
+import android.os.Handler
+import android.os.Looper
+import dashingineering.jetour.tboxcore.types.LogType
+import dashingineering.jetour.tboxcore.types.TBoxClientCallback
 import dashingineering.jetour.tboxcore.udp.UdpSocketManager
-import dashingineering.jetour.tboxcore.util.toHex
 import kotlinx.coroutines.*
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -18,98 +18,86 @@ class TcpServer(
     private val udpManager: UdpSocketManager,
     private val callback: TBoxClientCallback
 ) {
-
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var serverSocket: ServerSocket? = null
     private val clients = CopyOnWriteArrayList<ClientHandler>()
     private var scope: CoroutineScope? = null
     private var isRunning = false
 
-    private val log: (LogType, String, String) -> Unit = { type, tag, msg ->
-        callback.onLogMessage(type, tag, msg)
+    private fun onLogMessage(type: LogType, tag: String, message: String) {
+        mainHandler.post {
+            callback.onLogMessage(type, tag, message)
+        }
     }
 
     suspend fun start(): Boolean {
         if (isRunning) return true
 
-        return try {
-            // 🔧 Явно биндим на 127.0.0.1 для стабильности в эмуляторе
-            serverSocket = ServerSocket(port, 50, InetAddress.getByName("127.0.0.1")).apply {
-                reuseAddress = true
+        return withContext(Dispatchers.IO) {
+            try {
+                serverSocket = ServerSocket(port, 50, InetAddress.getByName("127.0.0.1")).apply {
+                    reuseAddress = true
+                }
+
+                scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+                isRunning = true
+
+                onLogMessage(LogType.INFO, "TcpServer", "Started on port $port")
+
+                scope?.launch {
+                    acceptLoop()
+                }
+
+                onLogMessage(LogType.INFO, "TcpServer", "Accept loop started, ready for clients")
+                true
+
+            } catch (e: Exception) {
+                onLogMessage(LogType.ERROR, "TcpServer", "Start failed: ${e.javaClass.simpleName}: ${e.message}")
+                false
             }
-
-            scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            isRunning = true
-
-            log(LogType.INFO, "TcpServer", "Started on port $port")
-
-            // 🔧 Запускаем цикл accept() в ОТДЕЛЬНОЙ корутине
-            scope?.launch {
-                acceptLoop()
-            }
-
-            // 🔧 Теперь эта строка выполнится сразу!
-            log(LogType.INFO, "TcpServer", "Accept loop started, ready for clients")
-            true
-
-        } catch (e: Exception) {
-            log(LogType.ERROR, "TcpServer", "Start failed: ${e.javaClass.simpleName}: ${e.message}")
-            false
         }
     }
 
-    // 🔧 НОВЫЙ метод: цикл приёма подключений (не блокирует start())
     private suspend fun acceptLoop() {
         while (isRunning && !serverSocket?.isClosed!!) {
             try {
-                // accept() блокирует, но это ок — мы в отдельной корутине на IO
                 val clientSocket = serverSocket?.accept() ?: break
+                onLogMessage(LogType.INFO, "TcpServer", "Client connected from ${clientSocket.inetAddress}")
+
+                val handler = ClientHandler(clientSocket, callback, udpManager)
+                clients.add(handler)
+                onLogMessage(LogType.INFO, "TcpServer", "Total clients: ${clients.size}")
+
                 scope?.launch {
-                    handleClient(clientSocket)
+                    handler.handle()
                 }
             } catch (e: Exception) {
                 if (isRunning) {
-                    log(LogType.ERROR, "TcpServer", "Accept error: ${e.message}")
+                    onLogMessage(LogType.ERROR, "TcpServer", "Accept error: ${e.message}")
                 }
             }
         }
-        log(LogType.INFO, "TcpServer", "Accept loop stopped")
+        onLogMessage(LogType.INFO, "TcpServer", "Accept loop stopped")
     }
 
-    private suspend fun handleClient(socket: Socket) {
-        val handler = ClientHandler(socket, callback)
-        clients.add(handler)
-
-        log(LogType.INFO, "TcpServer", "Client connected (${clients.size} total)")
-
-        try {
-            while (isRunning && handler.isActive()) {
-                val data = handler.receive() ?: break
-
-                // TCP → UDP: пересылка в сокет
-                val sent = udpManager.send(data)
-                log(LogType.DEBUG, "TcpServer", "Forwarded ${data.size} bytes to UDP: ${sent}")
-            }
-        } catch (e: Exception) {
-            log(LogType.ERROR, "TcpServer", "Client handler error: ${e.message}")
-        } finally {
-            clients.remove(handler)
-            handler.close()
-            log(LogType.INFO, "TcpServer", "Client disconnected (${clients.size} remaining)")
-        }
-    }
-
-    // Рассылка UDP → TCP
     fun broadcastToClients( data: ByteArray) {
-        if (clients.isEmpty()) return
+        if (clients.isEmpty()) {
+            onLogMessage(LogType.DEBUG, "TcpServer", "No clients to broadcast to")
+            return
+        }
+
         val frame = FrameCodec.encode(data)
         scope?.launch {
+            var sentCount = 0
             clients.forEach { client ->
                 try {
                     client.sendRaw(frame)
+                    sentCount++
                 } catch (e: Exception) {
-                    log(LogType.WARN, "TcpServer", "Send to client failed: ${e.message}")
+                    onLogMessage(LogType.WARN, "TcpServer", "Send to client failed: ${e.message}")
                 }
             }
+            onLogMessage(LogType.DEBUG, "TcpServer", "Broadcast to $sentCount/${clients.size} clients: ${data.size} bytes")
         }
     }
 
@@ -117,79 +105,136 @@ class TcpServer(
         if (!isRunning) return
         isRunning = false
 
+        onLogMessage(LogType.INFO, "TcpServer", "Stopping...")
+
+        // Закрываем всех клиентов
         clients.forEach { it.close() }
         clients.clear()
+
+        // Закрываем сервер
         serverSocket?.close()
         serverSocket = null
+
+        // Отменяем корутины
         scope?.cancel()
         scope = null
 
-        log(LogType.INFO, "TcpServer", "Stopped")
+        onLogMessage(LogType.INFO, "TcpServer", "Stopped")
     }
 
     fun getConnectedClientsCount(): Int = clients.size
 }
 
-// ... ClientHandler класс без изменений ...
 private class ClientHandler(
     private val socket: Socket,
-    private val callback: TBoxClientCallback
+    private val callback: TBoxClientCallback,
+    private val udpManager: UdpSocketManager
 ) {
     private val input = DataInputStream(socket.getInputStream())
     private val output = DataOutputStream(socket.getOutputStream())
     private val buffer = ByteArray(65536)
     private var offset = 0
+    private var isActive = true
 
-    fun isActive(): Boolean = socket.isConnected && !socket.isClosed
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private fun onLogMessage(type: LogType, tag: String, message: String) {
+        mainHandler.post {
+            callback.onLogMessage(type, tag, message)
+        }
+    }
+
+    suspend fun handle() {
+        try {
+            while (isActive && socket.isConnected && !socket.isClosed) {
+                val data = receive()
+                if (data == null) {
+                    // Нет данных или ошибка — небольшая пауза
+                    delay(10)
+                    continue
+                }
+
+                onLogMessage(LogType.DEBUG, "ClientHandler", "Received ${data.size} bytes from client, forwarding to UDP")
+                val sent = udpManager.send(data)
+                onLogMessage(LogType.DEBUG, "ClientHandler", "Forwarded to UDP: $sent")
+            }
+        } catch (e: Exception) {
+            onLogMessage(LogType.ERROR, "ClientHandler", "Handler error: ${e.javaClass.simpleName}: ${e.message}")
+        } finally {
+            close()
+        }
+    }
 
     suspend fun receive(): ByteArray? {
-        return try {
-            if (input.available() > 0) {
+        return withContext(Dispatchers.IO) {
+            try {
+                val available = input.available()
+                if (available <= 0) {
+                    return@withContext null
+                }
+
                 val read = input.read(buffer, offset, buffer.size - offset)
-                if (read <= 0) return null
+                if (read <= 0) {
+                    return@withContext null
+                }
+
                 offset += read
 
                 var processed = 0
                 while (processed < offset) {
                     when (val result = FrameCodec.decode(buffer, processed)) {
                         is FrameCodec.DecodeResult.Success -> {
-                            return result.data.also {
-                                if (result.consumed < offset) {
-                                    val remaining = offset - result.consumed
-                                    System.arraycopy(buffer, result.consumed, buffer, 0, remaining)
-                                    offset = remaining
-                                } else {
-                                    offset = 0
-                                }
+                            // Сдвигаем буфер если остались необработанные данные
+                            if (result.consumed < offset) {
+                                val remaining = offset - result.consumed
+                                System.arraycopy(buffer, result.consumed, buffer, 0, remaining)
+                                offset = remaining
+                            } else {
+                                offset = 0
                             }
+                            return@withContext result.data
                         }
-                        is FrameCodec.DecodeResult.Incomplete -> return null
+                        is FrameCodec.DecodeResult.Incomplete -> {
+                            // Нужно больше данных
+                            return@withContext null
+                        }
                         is FrameCodec.DecodeResult.Error -> {
-                            callback.onLogMessage(LogType.ERROR, "ClientHandler", result.message)
-                            return null
+                            onLogMessage(LogType.ERROR, "ClientHandler", result.message)
+                            this@ClientHandler.isActive = false
+                            return@withContext null
                         }
                     }
                 }
+                null
+            } catch (e: Exception) {
+                onLogMessage(LogType.ERROR, "ClientHandler", "Receive error: ${e.message}")
+                this@ClientHandler.isActive = false
+                null
             }
-            null
-        } catch (e: Exception) {
-            null
         }
     }
 
     suspend fun sendRaw(frame: ByteArray): Boolean {
-        return try {
-            output.write(frame)
-            output.flush()
-            true
-        } catch (e: Exception) {
-            false
+        return withContext(Dispatchers.IO) {
+            try {
+                output.write(frame)
+                output.flush()
+                true
+            } catch (e: Exception) {
+                onLogMessage(LogType.ERROR, "ClientHandler", "Send failed: ${e.message}")
+                false
+            }
         }
     }
 
     fun close() {
+        if (!isActive) return
+        isActive = false
+
         try { socket.close() } catch (_: Exception) {}
         try { input.close() } catch (_: Exception) {}
         try { output.close() } catch (_: Exception) {}
+
+        onLogMessage(LogType.INFO, "ClientHandler", "Client connection closed")
     }
 }

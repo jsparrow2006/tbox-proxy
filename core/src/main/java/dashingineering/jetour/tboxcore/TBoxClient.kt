@@ -5,12 +5,13 @@ import android.content.Intent
 import dashingineering.jetour.tboxcore.discovery.TcpDiscovery
 import dashingineering.jetour.tboxcore.service.TBoxBridgeService
 import dashingineering.jetour.tboxcore.tcp.TcpClient
+import dashingineering.jetour.tboxcore.types.LogType
+import dashingineering.jetour.tboxcore.types.TBoxClientCallback
+import dashingineering.jetour.tboxcore.types.TBoxCommand
 import dashingineering.jetour.tboxcore.util.ByteConverter
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
 import dashingineering.jetour.tboxcore.util.startForegroundServiceCompat
 import kotlinx.coroutines.*
-import kotlinx.coroutines.sync.withLock
-import java.net.DatagramPacket
 import java.net.InetAddress
 import kotlin.collections.plus
 
@@ -59,20 +60,16 @@ class TBoxClient(
     private val callback: TBoxClientCallback
 ) {
 
-    // Companion object для констант (вместо того что было в object)
     companion object {
-        // === КОНСТАНТЫ ПО УМОЛЧАНИЮ ===
         const val DEFAULT_LOCAL_PORT = 11048
         const val DEFAULT_REMOTE_PORT = 50047
         const val DEFAULT_REMOTE_ADDRESS = "192.168.225.1"
         const val DEFAULT_TCP_PORT = 1104
         const val DEFAULT_HOST = "127.0.0.1"
-        // ===============================
     }
 
-    // Внутреннее состояние (instance properties вместо object vars)
     private var config: Config? = null
-    private var tcpClient: TcpClient? = null
+    private var tcpClient: TcpClient? = null  // Для подключения к серверу (в любом режиме)
     private var isServerMode = false
     private var scope: CoroutineScope? = null
     private var isInitialized = false
@@ -85,21 +82,12 @@ class TBoxClient(
         val host: String
     )
 
-    // Блок инициализации (выполняется при создании экземпляра)
-//    init {
-//        initialize()
-//    }
-
-    /**
-     * Внутренняя инициализация
-     */
     fun initialize() {
         if (isInitialized) {
             log(LogType.WARN, "TBoxClient", "Already initialized, ignoring duplicate init")
             return
         }
 
-        // Конвертируем String в InetAddress
         val inetAddress = try {
             InetAddress.getByName(remoteAddress)
         } catch (e: Exception) {
@@ -113,19 +101,14 @@ class TBoxClient(
 
         log(LogType.INFO, "TBoxClient", "Initialized with UDP:$localPort → $remoteAddress:$remotePort, TCP:$tcpPort")
 
-        // Запускаем обнаружение
         scope?.launch {
             discoverAndConnect()
         }
     }
 
-    /**
-     * Обнаружение сервера и подключение
-     */
     private suspend fun discoverAndConnect() {
         val cfg = config ?: return
 
-        // Проверяем наличие сервера
         val serverExists = TcpDiscovery.isServerAvailable(
             host = cfg.host,
             port = cfg.tcpPort,
@@ -133,33 +116,41 @@ class TBoxClient(
         )
 
         if (serverExists) {
-            // Подключаемся как клиент
             log(LogType.INFO, "TBoxClient", "Server found on port ${cfg.tcpPort}, connecting as client")
             connectAsClient(cfg)
         } else {
-            // Становимся сервером
             log(LogType.INFO, "TBoxClient", "No server found on port ${cfg.tcpPort}, starting local bridge")
             startAsServer(cfg)
         }
     }
 
-    /**
-     * Подключение в режиме клиента
-     */
     private suspend fun connectAsClient(cfg: Config) {
-        tcpClient = TcpClient(cfg.host, cfg.tcpPort, callback)
+        tcpClient = TcpClient(
+            host = cfg.host,
+            port = cfg.tcpPort,
+            callback = object : TBoxClientCallback {
+                override fun onDataReceived(data: ByteArray) {
+                    // Данные от сервера (UDP → TCP → мы)
+                    callback.onDataReceived(data)
+                }
+
+                override fun onLogMessage(type: LogType, tag: String, message: String) {
+                    callback.onLogMessage(type, "TcpClient.$tag", message)
+                }
+
+                override fun onConnectionChanged(connected: Boolean) {
+                    callback.onConnectionChanged(connected)
+                }
+            }
+        )
 
         val connected = tcpClient?.connect() == true
-        callback.onConnectionChanged(true)
         if (!connected) {
             log(LogType.WARN, "TBoxClient", "Failed to connect to server, trying to start local server")
             startAsServer(cfg)
         }
     }
 
-    /**
-     * Запуск в режиме сервера
-     */
     private fun startAsServer(cfg: Config) {
         val intent = Intent(context, TBoxBridgeService::class.java).apply {
             action = TBoxBridgeService.ACTION_START
@@ -172,35 +163,46 @@ class TBoxClient(
         context.startForegroundServiceCompat(intent)
         isServerMode = true
 
-        log(LogType.INFO, "TBoxClient", "Started as server (TCP port: ${cfg.tcpPort})")
+        scope?.launch {
+            delay(500)
 
-        // В режиме сервера считаем себя "подключенным"
-        callback.onConnectionChanged(true)
+            tcpClient = TcpClient(
+                host = cfg.host,
+                port = cfg.tcpPort,
+                callback = object : TBoxClientCallback {
+                    override fun onDataReceived(data: ByteArray) {
+                        callback.onDataReceived(data)
+                    }
+
+                    override fun onLogMessage(type: LogType, tag: String, message: String) {
+                        callback.onLogMessage(type, "TcpClient.$tag", message)
+                    }
+
+                    override fun onConnectionChanged(connected: Boolean) {
+                        callback.onConnectionChanged(connected)
+                    }
+                }
+            )
+
+            val connected = tcpClient?.connect() == true
+            if (connected) {
+                log(LogType.INFO, "TBoxClient", "Connected to local server (loopback)")
+                callback.onConnectionChanged(true)
+            } else {
+                log(LogType.ERROR, "TBoxClient", "Failed to connect to local server")
+            }
+        }
     }
 
-    /**
-     * 📤 Отправка сырых данных в UDP
-     *
-     * Работает в любом режиме (клиент или сервер)
-     *
-     * @param data байты для отправки (клиент сам формирует пакет по своему протоколу)
-     */
     fun sendRawMessage(data: ByteArray) {
-        log(LogType.INFO, "TBoxClient", "Sending RAW: ${data.toLogString()}")
-        when {
-            // Режим клиента: отправляем через TCP
-            tcpClient != null && !isServerMode -> {
-                scope?.launch {
-                    tcpClient?.send(data)
-                }
+        val client = tcpClient
+        if (client != null && client.isConnected) {
+            scope?.launch {
+                client.send(data)
             }
-            // Режим сервера: отправляем команду сервису
-            isServerMode && config != null -> {
-                sendViaService(data)
-            }
-            else -> {
-                log(LogType.ERROR, "TBoxClient", "Not initialized or disconnected")
-            }
+            log(LogType.DEBUG, "TBoxClient", "→ Send data via TCP: ${data.toLogString()}")
+        } else {
+            log(LogType.ERROR, "TBoxClient", "Not connected, cannot send")
         }
     }
 
@@ -211,44 +213,16 @@ class TBoxClient(
         sendRawMessage(fullData + checksum)
     }
 
-    /**
-     * Внутренний метод: отправка команды локальному сервису
-     */
-    private fun sendViaService( data: ByteArray) {
-        val intent = Intent(TBoxBridgeService.ACTION_SEND).apply {
-            setPackage(context.packageName)
-            putExtra(TBoxBridgeService.EXTRA_DATA, data)  // 🔧 Используйте константу
-        }
-        context.sendBroadcast(intent, "dashingineering.jetour.tboxcore.PERMISSION_TBOX")
-
-        log(LogType.DEBUG, "TBoxClient", "→ Sent broadcast command: ${data.toLogString()} (${data.size} bytes)")
+    fun sendCommand(command: TBoxCommand) {
+        sendCommand(command.tid, command.sid, command.cmd, command.data)
     }
 
-    /**
-     * 🔌 Проверка статуса подключения
-     *
-     * @return true если клиент подключён или работает в режиме сервера
-     */
     fun isConnected(): Boolean {
-        return when {
-            isServerMode -> true
-            tcpClient != null -> tcpClient?.isConnected == true
-            else -> false
-        }
+        return tcpClient?.isConnected == true
     }
 
-    /**
-     * 🔄 Получение текущего режима работы
-     *
-     * @return "SERVER" если запущен локальный сервис, "CLIENT" если подключены к серверу
-     */
     fun getMode(): String = if (isServerMode) "SERVER" else "CLIENT"
 
-    /**
-     * 🧹 Очистка ресурсов
-     *
-     * Вызывать при уничтожении Activity/Service или приложения
-     */
     fun destroy() {
         if (!isInitialized) return
 
@@ -258,7 +232,6 @@ class TBoxClient(
         tcpClient?.disconnect()
         tcpClient = null
 
-        // Останавливаем сервис если мы его запустили
         if (isServerMode) {
             try {
                 context.stopService(Intent(context, TBoxBridgeService::class.java))
@@ -273,12 +246,8 @@ class TBoxClient(
         isInitialized = false
 
         log(LogType.INFO, "TBoxClient", "Destroyed complete")
-        callback.onConnectionChanged(false)
     }
 
-    /**
-     * Вспомогательный метод для логирования
-     */
     private fun log(type: LogType, tag: String, message: String) {
         callback.onLogMessage(type, tag, message)
     }

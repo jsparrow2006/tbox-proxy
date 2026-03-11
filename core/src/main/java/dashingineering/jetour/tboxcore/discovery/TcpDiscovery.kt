@@ -5,18 +5,7 @@ import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
 import java.net.Socket
 
-/**
- * Утилита для проверки доступности TCP-сервера
- */
 object TcpDiscovery {
-
-    /**
-     * Быстрая проверка: доступен ли сервер на порту
-     * @param host хост (обычно "127.0.0.1")
-     * @param port порт (по умолчанию 1104)
-     * @param timeoutMs таймаут в миллисекундах
-     * @return true если сервер отвечает
-     */
     suspend fun isServerAvailable(
         host: String = "127.0.0.1",
         port: Int = 1104,

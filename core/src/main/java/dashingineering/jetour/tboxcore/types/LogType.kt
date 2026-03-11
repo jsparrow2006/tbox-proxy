@@ -1,4 +1,4 @@
-package dashingineering.jetour.tboxcore
+package dashingineering.jetour.tboxcore.types
 
 enum class LogType(val label: String) {
     DEBUG("DEBUG"),

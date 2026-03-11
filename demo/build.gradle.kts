@@ -38,19 +38,16 @@ android {
     }
 
     buildFeatures {
-        // Отключи Compose
         compose = false
     }
     compileSdkExtension = 11
 }
 
 dependencies {
-    // Базовые зависимости без Compose
     implementation("androidx.core:core-ktx:1.10.0")
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation("androidx.activity:activity:1.7.0")
-//    implementation(libs.androidx.constraintlayout)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -1,6 +1,7 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("maven-publish")
 }
 
 android {
@@ -22,10 +23,28 @@ android {
         jvmTarget = "17"
     }
 
-    sourceSets {
-        getByName("main").aidl.srcDir("src/main/aidl")
-    }
     compileSdkExtension = 11
+
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+            withJavadocJar()
+        }
+    }
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            register<MavenPublication>("release") {
+                groupId = "jsparrow2006"  // Ваш GitHub username
+                artifactId = "tboxcore"                   // Имя артефакта
+                version = "1.0.0"                         // Игнорируется JitPack, но нужен для локальной сборки
+
+                from(components["release"])
+            }
+        }
+    }
 }
 
 dependencies {

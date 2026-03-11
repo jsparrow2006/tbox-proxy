@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -30,9 +31,8 @@ class PacketAdapter(private val recyclerView: RecyclerView) : RecyclerView.Adapt
 
     fun addPacket(packet: ITBoxMessage) {
         packets.add(packet)
+        Log.d("PROXY_LIB", packet.message)
         notifyItemInserted(packets.size - 1)
-//        packets.add(0, packet) // новые — сверху
-//        notifyItemInserted(0)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {

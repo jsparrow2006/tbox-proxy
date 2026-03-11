@@ -149,8 +149,10 @@ override fun onDestroy() {
 
 ### The library automatically adds to your manifest:
 ```kotlin
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-<uses-permission android:name="android.permission.POST_NOTIFICATIONS" /> <!-- Android 13+ -->
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 ```
 
 Ensure your app has permission to run foreground services (especially on Android 12+).

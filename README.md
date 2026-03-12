@@ -9,7 +9,7 @@ A Kotlin/Android library that enables **safe, concurrent access to a single TBox
 - If the host app crashes, another should **automatically take over** without data loss.
 
 This library provides:
-- A **single foreground service** (`TboxHostService`) that owns the UDP socket.
+- A **single foreground service** (`TBoxBridgeService`) that owns the UDP socket.
 - **Automatic host election**: any client can become the host if none exists.
 - **Zero boilerplate**: no need to write your own service or manage sockets.
 
@@ -35,18 +35,11 @@ dependencyResolutionManagement {
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.github.jsparrow2006:tbox-proxy:latest")
+    implementation("com.github.jsparrow2006:tbox-proxy:v1.0.0")
 }
 ```
 
-Or other versions
-
-```kotlin
-// build.gradle.kts
-dependencies {
-    implementation("com.github.jsparrow2006:tbox-proxy:1.0.0")
-}
-```
+You can find all released versions [here](https://github.com/jsparrow2006/tbox-proxy/releases)
 
 ✅ Requires Kotlin ≥ 1.8 and AGP ≥ 8.0.
 
@@ -86,8 +79,8 @@ val client = TBoxClient(
         override fun onDataReceived(data: ByteArray) {
             //Get received data from T-Box
             //For to get raw ByteArray for logging
-            //data.toLogString(0) without lenth limin
-            //data.toLogString(100) with lenth limin
+            //data.toLogString(0) without lenth limit
+            //data.toLogString(100) with lenth limit
         }
 
         override fun onLogMessage(type: LogType, tag: String, message: String) {

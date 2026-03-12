@@ -35,7 +35,7 @@ dependencyResolutionManagement {
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.github.jsparrow2006:tbox-proxy:v1.0.0")
+    implementation("com.github.jsparrow2006:tbox-proxy:v1.0.1")
 }
 ```
 

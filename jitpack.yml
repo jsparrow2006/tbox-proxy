@@ -1,2 +1,5 @@
 jdk:
   - openjdk17
+
+install:
+  - ./gradlew :core:publishToMavenLocal -x :demo:lintVitalDemo1Release -x :demo:lintVitalDemo2Release

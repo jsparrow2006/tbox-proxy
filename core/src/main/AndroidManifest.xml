@@ -12,28 +12,14 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
 
-
-    <!-- Кастомное разрешение для межприложенного взаимодействия -->
-    <permission
-        android:name="dashingineering.jetour.tboxcore.PERMISSION_TBOX"
-        android:protectionLevel="normal" />
-    <uses-permission android:name="dashingineering.jetour.tboxcore.PERMISSION_TBOX" />
-
     <application>
 
         <service
             android:name=".service.TBoxBridgeService"
             android:enabled="true"
-            android:exported="true"
-            android:permission="dashingineering.jetour.tboxcore.PERMISSION_TBOX"
-            android:foregroundServiceType="specialUse"
+            android:exported="false"
             tools:ignore="ForegroundServicePermission"
             android:stopWithTask="false">
-
-            <intent-filter>
-                <action android:name="dashingineering.jetour.tboxcore.service.START" />
-                <action android:name="dashingineering.jetour.tboxcore.ACTION_SEND" />
-            </intent-filter>
 
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"

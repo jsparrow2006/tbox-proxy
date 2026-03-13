@@ -39,6 +39,15 @@ dependencies {
 }
 ```
 
+or 
+
+```kotlin
+// build.gradle.kts
+dependencies {
+    implementation("com.github.jsparrow2006:tbox-proxy:v1.+")
+}
+```
+
 You can find all released versions [here](https://github.com/jsparrow2006/tbox-proxy/releases)
 
 ✅ Requires Kotlin ≥ 1.8 and AGP ≥ 8.0.

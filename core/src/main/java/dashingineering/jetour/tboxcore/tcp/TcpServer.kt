@@ -70,6 +70,9 @@ class TcpServer(
 
                 scope?.launch {
                     handler.handle()
+                    // Клиент отключился — удаляем из списка
+                    clients.remove(handler)
+                    onLogMessage(LogType.INFO, "TcpServer", "Client removed. Total clients: ${clients.size}")
                 }
             } catch (e: Exception) {
                 if (isRunning) {
@@ -80,7 +83,7 @@ class TcpServer(
         onLogMessage(LogType.INFO, "TcpServer", "Accept loop stopped")
     }
 
-    fun broadcastToClients( data: ByteArray) {
+    fun broadcastToClients(data: ByteArray) {
         if (clients.isEmpty()) {
             onLogMessage(LogType.DEBUG, "TcpServer", "No clients to broadcast to")
             return
@@ -89,14 +92,29 @@ class TcpServer(
         val frame = FrameCodec.encode(data)
         scope?.launch {
             var sentCount = 0
+            val deadClients = mutableListOf<ClientHandler>()
+            
             clients.forEach { client ->
                 try {
                     client.sendRaw(frame)
                     sentCount++
                 } catch (e: Exception) {
                     onLogMessage(LogType.WARN, "TcpServer", "Send to client failed: ${e.message}")
+                    // Клиент мёртв — пометим на удаление
+                    deadClients.add(client)
                 }
             }
+            
+            // Удаляем мёртвых клиентов
+            deadClients.forEach { client ->
+                client.close()
+                clients.remove(client)
+            }
+            
+            if (deadClients.isNotEmpty()) {
+                onLogMessage(LogType.INFO, "TcpServer", "Removed ${deadClients.size} dead clients. Total: ${clients.size}")
+            }
+            
             onLogMessage(LogType.DEBUG, "TcpServer", "Broadcast to $sentCount/${clients.size} clients: ${data.size} bytes")
         }
     }
@@ -149,7 +167,12 @@ private class ClientHandler(
             while (isActive && socket.isConnected && !socket.isClosed) {
                 val data = receive()
                 if (data == null) {
-                    // Нет данных или ошибка — небольшая пауза
+                    // read() вернул -1 — соединение разорвано
+                    if (!isActive) {
+                        onLogMessage(LogType.INFO, "ClientHandler", "Connection closed by remote")
+                        return
+                    }
+                    // Просто нет данных — небольшая пауза
                     delay(10)
                     continue
                 }
@@ -168,13 +191,15 @@ private class ClientHandler(
     suspend fun receive(): ByteArray? {
         return withContext(Dispatchers.IO) {
             try {
-                val available = input.available()
-                if (available <= 0) {
-                    return@withContext null
-                }
-
+                // Блокирующий read — ждём данные
+                // read() вернёт -1 при разрыве соединения
                 val read = input.read(buffer, offset, buffer.size - offset)
+                
                 if (read <= 0) {
+                    // -1 = соединение разорвано, 0 = нет данных (неблокирующий режим)
+                    if (read == -1) {
+                        this@ClientHandler.isActive = false
+                    }
                     return@withContext null
                 }
 
@@ -207,7 +232,7 @@ private class ClientHandler(
                 }
                 null
             } catch (e: Exception) {
-                onLogMessage(LogType.ERROR, "ClientHandler", "Receive error: ${e.message}")
+                onLogMessage(LogType.ERROR, "ClientHandler", "Receive error: ${e.javaClass.simpleName}: ${e.message}")
                 this@ClientHandler.isActive = false
                 null
             }

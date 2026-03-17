@@ -8,4 +8,8 @@ object TBoxConstants {
     const val SWD_CODE = 0x2D.toByte()
     const val NTM_CODE = 0x24.toByte()
     const val GATE_CODE = 0x80.toByte()
+
+    const val HUM_CODE = 0x30.toByte()
+    const val UDA_CODE = 0x38.toByte()
+    const val SELF_CODE = 0x50.toByte()
 }

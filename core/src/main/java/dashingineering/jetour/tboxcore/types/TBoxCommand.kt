@@ -4,5 +4,6 @@ data class TBoxCommand (
     val tid: Byte,
     val sid: Byte,
     val cmd: Byte,
-    val data: ByteArray
+    val data: ByteArray,
+    val textMessage: String = ""
 )

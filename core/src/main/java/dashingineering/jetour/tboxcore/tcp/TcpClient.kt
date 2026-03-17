@@ -33,13 +33,16 @@ class TcpClient(
         }
     }
 
-    private fun onDataReceived( data: ByteArray) {
+    private fun onDataReceived(data: ByteArray) {
+        // Постим в main поток для безопасной работы с UI
+        // Это стандартная практика для Android callbacks
         postToMain {
             callback.onDataReceived(data)
         }
     }
 
     private fun onConnectionChanged(connected: Boolean) {
+        // Статус соединения тоже постим в main
         postToMain {
             callback.onConnectionChanged(connected)
         }
@@ -85,44 +88,43 @@ class TcpClient(
 
         while (isConnected && socket?.isConnected == true) {
             try {
-                val available = input?.available() ?: 0
-                if (available > 0) {
-                    val read = input?.read(buffer, offset, buffer.size - offset) ?: -1
-                    if (read > 0) {
-                        offset += read
+                // Блокирующий read - ждём данные без polling
+                // input.available() может вернуть 0 даже если данные есть в пути
+                val read = input?.read(buffer, offset, buffer.size - offset) ?: -1
+                
+                if (read > 0) {
+                    offset += read
 
-                        var processed = 0
-                        while (processed < offset) {
-                            when (val result = FrameCodec.decode(buffer, processed)) {
-                                is FrameCodec.DecodeResult.Success -> {
-                                    onDataReceived(result.data)
-                                    processed += result.consumed
-                                }
-                                is FrameCodec.DecodeResult.Incomplete -> {
-                                    break
-                                }
-                                is FrameCodec.DecodeResult.Error -> {
-                                    onLogMessage(LogType.ERROR, "TcpClient", "Decode error: ${result.message}")
-                                    disconnect("Decode error")
-                                    return
-                                }
+                    var processed = 0
+                    while (processed < offset) {
+                        when (val result = FrameCodec.decode(buffer, processed)) {
+                            is FrameCodec.DecodeResult.Success -> {
+                                onDataReceived(result.data)
+                                processed += result.consumed
+                            }
+                            is FrameCodec.DecodeResult.Incomplete -> {
+                                break
+                            }
+                            is FrameCodec.DecodeResult.Error -> {
+                                onLogMessage(LogType.ERROR, "TcpClient", "Decode error: ${result.message}")
+                                disconnect("Decode error")
+                                return
                             }
                         }
-
-                        if (processed > 0 && processed < offset) {
-                            val remaining = offset - processed
-                            System.arraycopy(buffer, processed, buffer, 0, remaining)
-                            offset = remaining
-                        } else if (processed >= offset) {
-                            offset = 0
-                        }
-                    } else if (read == -1) {
-                        disconnect("Server closed connection")
-                        return
                     }
-                } else {
-                    delay(10)
+
+                    if (processed > 0 && processed < offset) {
+                        val remaining = offset - processed
+                        System.arraycopy(buffer, processed, buffer, 0, remaining)
+                        offset = remaining
+                    } else if (processed >= offset) {
+                        offset = 0
+                    }
+                } else if (read == -1) {
+                    disconnect("Server closed connection")
+                    return
                 }
+                // Если read == 0 (неблокирующий режим) - продолжаем цикл без delay
             } catch (e: Exception) {
                 if (isConnected) {
                     onLogMessage(LogType.ERROR, "TcpClient", "Receive error: ${e.javaClass.simpleName}: ${e.message}")

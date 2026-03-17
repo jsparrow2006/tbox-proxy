@@ -4,6 +4,8 @@ import dashingineering.jetour.tboxcore.types.LogType
 import dashingineering.jetour.tboxcore.types.TBoxClientCallback
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
@@ -20,6 +22,7 @@ class UdpSocketManager(
     private var socket: DatagramSocket? = null
     private var scope: CoroutineScope? = null
     private var isReceiving = false
+    private val sendMutex = Mutex()
 
     private val log: (LogType, String, String) -> Unit = { type, tag, msg ->
         callback.onLogMessage(type, tag, msg)
@@ -88,19 +91,21 @@ class UdpSocketManager(
         val sock = socket ?: return false
 
         return withContext(Dispatchers.IO) {
-            try {
-                val packet = DatagramPacket(data, data.size, remoteAddress, remotePort)
-                sock.send(packet)
+            sendMutex.withLock {
+                try {
+                    val packet = DatagramPacket(data, data.size, remoteAddress, remotePort)
+                    sock.send(packet)
 
-                callback.onLogMessage(
-                    LogType.DEBUG,
-                    "UdpSocketManager",
-                    "→ UDP sent ${data.size} bytes to $remoteAddress:$remotePort: ${data.toLogString()}"
-                )
-                true
-            } catch (e: Exception) {
-                log(LogType.ERROR, "UdpSocketManager", "Send failed: ${e.message}")
-                false
+                    callback.onLogMessage(
+                        LogType.DEBUG,
+                        "UdpSocketManager",
+                        "→ UDP sent ${data.size} bytes to $remoteAddress:$remotePort: ${data.toLogString()}"
+                    )
+                    true
+                } catch (e: Exception) {
+                    log(LogType.ERROR, "UdpSocketManager", "Send failed: ${e.message}")
+                    false
+                }
             }
         }
     }

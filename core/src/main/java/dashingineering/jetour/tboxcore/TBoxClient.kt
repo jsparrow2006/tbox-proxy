@@ -12,6 +12,7 @@ import dashingineering.jetour.tboxcore.util.ByteConverter
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
 import dashingineering.jetour.tboxcore.util.startForegroundServiceCompat
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import java.net.InetAddress
 import kotlin.collections.plus
 
@@ -74,6 +75,10 @@ class TBoxClient(
     private var scope: CoroutineScope? = null
     private var isInitialized = false
 
+    // Очередь для последовательной отправки команд
+    private lateinit var sendQueue: Channel<ByteArray>
+    private var sendJob: Job? = null
+
     private data class Config(
         val localPort: Int,
         val remotePort: Int,
@@ -98,6 +103,14 @@ class TBoxClient(
         this.config = Config(localPort, remotePort, inetAddress, tcpPort, host)
         this.scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
         this.isInitialized = true
+        
+        // Сбрасываем и создаём новую очередь при новой инициализации
+        sendJob?.cancel()
+        if (::sendQueue.isInitialized) {
+            sendQueue.close()
+        }
+        sendJob = null
+        sendQueue = Channel(Channel.UNLIMITED)
 
         log(LogType.INFO, "TBoxClient", "Initialized with UDP:$localPort → $remoteAddress:$remotePort, TCP:$tcpPort")
 
@@ -148,6 +161,9 @@ class TBoxClient(
         if (!connected) {
             log(LogType.WARN, "TBoxClient", "Failed to connect to server, trying to start local server")
             startAsServer(cfg)
+        } else {
+            // Запускаем обработчик очереди отправки
+            startSendProcessor()
         }
     }
 
@@ -188,32 +204,113 @@ class TBoxClient(
             if (connected) {
                 log(LogType.INFO, "TBoxClient", "Connected to local server (loopback)")
                 callback.onConnectionChanged(true)
+                // Запускаем обработчик очереди отправки
+                startSendProcessor()
             } else {
                 log(LogType.ERROR, "TBoxClient", "Failed to connect to local server")
             }
         }
     }
 
+    /**
+     * Запускает обработчик очереди отправки.
+     * Обрабатывает команды последовательно в порядке добавления.
+     */
+    private fun startSendProcessor() {
+        sendJob?.cancel()
+        sendJob = scope?.launch(Dispatchers.IO) {
+            for (data in sendQueue) {
+                val client = tcpClient
+                if (client != null && client.isConnected) {
+                    val sent = client.send(data)
+                    withContext(Dispatchers.Main) {
+                        if (sent) {
+                            log(LogType.DEBUG, "TBoxClient", "→ Sent via TCP: ${data.toLogString()}")
+                        } else {
+                            log(LogType.ERROR, "TBoxClient", "Failed to send data")
+                        }
+                    }
+                } else {
+                    log(LogType.ERROR, "TBoxClient", "Not connected, cannot send")
+                }
+            }
+        }
+        log(LogType.INFO, "TBoxClient", "Send processor started")
+    }
+
+    /**
+     * Отправляет raw данные в TBox через TCP мост.
+     * 
+     * Метод **асинхронный** — не блокирует вызывающий поток.
+     * Можно безопасно вызывать из UI-потока.
+     * 
+     * Команды отправляются **последовательно** в порядке вызова.
+     * 
+     * @param data данные для отправки (команда с заголовком и checksum)
+     * 
+     * @sample
+     * // Вызов из UI-потока — безопасно
+     * button.setOnClickListener {
+     *     tboxClient.sendRawMessage(command)
+     * }
+     * 
+     * @sample
+     * // Серийная отправка — команды уйдут по порядку
+     * tboxClient.sendCommand(cmd1)
+     * tboxClient.sendCommand(cmd2)
+     * tboxClient.sendCommand(cmd3)
+     */
     fun sendRawMessage(data: ByteArray) {
         val client = tcpClient
         if (client != null && client.isConnected) {
-            scope?.launch {
-                client.send(data)
+            // Добавляем в очередь для последовательной отправки
+            if (!sendQueue.trySend(data).isSuccess) {
+                log(LogType.ERROR, "TBoxClient", "Failed to queue data for sending")
             }
-            log(LogType.DEBUG, "TBoxClient", "→ Send data via TCP: ${data.toLogString()}")
         } else {
             log(LogType.ERROR, "TBoxClient", "Not connected, cannot send")
         }
     }
 
+    /**
+     * Отправляет команду в TBox.
+     * 
+     * Метод асинхронный — не блокирует вызывающий поток.
+     * 
+     * @param tid идентификатор транзакции
+     * @param sid идентификатор системы
+     * @param cmd код команды
+     * @param data данные команды
+     * 
+     * @sample
+     * // Отправка команды получения CAN-фреймов
+     * tboxClient.sendCommand(0x01, 0x10, 0x15, byteArrayOf(0x01, 0x02))
+     */
     fun sendCommand(tid: Byte, sid: Byte, cmd: Byte, data: ByteArray) {
-        log(LogType.INFO, "TBoxClient", "Sending command: tid: $tid sid: $sid cmd: $cmd data: ${data.toLogString()} ")
         val fullData = ByteConverter.fillHeader(data.size, tid, sid, cmd) + data
         val checksum = ByteConverter.xorSum(fullData)
         sendRawMessage(fullData + checksum)
     }
 
+    /**
+     * Отправляет команду в TBox.
+     * 
+     * Метод асинхронный — не блокирует вызывающий поток.
+     * 
+     * @param command объект команды
+     * 
+     * @sample
+     * // Создание и отправка команды
+     * val command = TBoxCommand(
+     *     tid = TBoxConstants.CRT_CODE,
+     *     sid = TBoxConstants.GATE_CODE,
+     *     cmd = 0x15,
+     *     data = byteArrayOf(0x01, 0x02)
+     * )
+     * tboxClient.sendCommand(command)
+     */
     fun sendCommand(command: TBoxCommand) {
+        log(LogType.INFO, "TBoxClient", "${command.textMessage} Sending command: tid: ${command.tid} sid: ${command.sid} cmd: ${command.cmd} data: ${command.data.toLogString()} ")
         sendCommand(command.tid, command.sid, command.cmd, command.data)
     }
 
@@ -227,6 +324,13 @@ class TBoxClient(
         if (!isInitialized) return
 
         log(LogType.INFO, "TBoxClient", "Destroying...")
+
+        // Отменяем обработчик очереди
+        sendJob?.cancel()
+        sendJob = null
+        if (::sendQueue.isInitialized) {
+            sendQueue.close()
+        }
 
         scope?.cancel()
         tcpClient?.disconnect()

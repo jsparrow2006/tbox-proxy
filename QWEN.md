@@ -40,6 +40,30 @@
 - **TCP Bridge**: Uses TCP port `1104` for inter-process communication
 - **Raw Data Delivery**: Receives `ByteArray` — you control parsing logic
 - **No UI Dependencies**: Works in services, workers, or background tasks
+- **Lightweight**: ~50 KB of actual code + minimal dependencies
+
+### Library Size
+
+The library is optimized for minimal size impact:
+
+| Component | Size |
+|-----------|------|
+| **Source code** | ~50 KB (13 Kotlin files) |
+| **Compiled .aar** | ~100-150 KB |
+| **Dependencies** | ~300 KB (kotlinx-coroutines, androidx) |
+| **Total impact** | **< 0.5 MB** in your APK |
+
+**Note:** Previous versions included `cronet-embedded` (~25 MB) which was unused. This dependency has been removed.
+
+### Dependencies
+
+```kotlin
+implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")  // ~200 KB
+implementation("androidx.annotation:annotation:1.7.1")                     // ~50 KB
+implementation("androidx.core:core-ktx:1.12.0")                            // ~50 KB
+```
+
+Total: **~300 KB** of transitive dependencies (most are already in most Android apps).
 
 ## Project Structure
 

@@ -3,7 +3,7 @@ package dashingineering.jetour.tboxcore.tcp
 import android.os.Handler
 import android.os.Looper
 import dashingineering.jetour.tboxcore.types.LogType
-import dashingineering.jetour.tboxcore.types.TBoxClientCallback
+import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.udp.UdpSocketManager
 import kotlinx.coroutines.*
 import java.io.DataInputStream
@@ -16,7 +16,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 class TcpServer(
     private val port: Int,
     private val udpManager: UdpSocketManager,
-    private val callback: TBoxClientCallback
+    private val callback: TBoxCallback
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var serverSocket: ServerSocket? = null
@@ -145,7 +145,7 @@ class TcpServer(
 
 private class ClientHandler(
     private val socket: Socket,
-    private val callback: TBoxClientCallback,
+    private val callback: TBoxCallback,
     private val udpManager: UdpSocketManager
 ) {
     private val input = DataInputStream(socket.getInputStream())

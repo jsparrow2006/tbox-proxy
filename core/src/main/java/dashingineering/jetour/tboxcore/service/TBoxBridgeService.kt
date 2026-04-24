@@ -9,7 +9,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import dashingineering.jetour.tboxcore.types.LogType
-import dashingineering.jetour.tboxcore.types.TBoxClientCallback
+import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.tcp.TcpServer
 import dashingineering.jetour.tboxcore.udp.UdpSocketManager
 import kotlinx.coroutines.*
@@ -35,7 +35,7 @@ class TBoxBridgeService : Service() {
     private var udpManager: UdpSocketManager? = null
     private var isForegroundStarted = false
 
-    private val bridgeCallback = object : TBoxClientCallback {
+    private val bridgeCallback = object : TBoxCallback {
         override fun onDataReceived( data: ByteArray) {
             tcpServer?.broadcastToClients(data)
             log(LogType.DEBUG, "TBoxService", "↻ Broadcast to TCP clients: ${data.size} bytes")

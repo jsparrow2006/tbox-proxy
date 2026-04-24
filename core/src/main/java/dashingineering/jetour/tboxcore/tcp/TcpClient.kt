@@ -3,7 +3,7 @@ package dashingineering.jetour.tboxcore.tcp
 import android.os.Handler
 import android.os.Looper
 import dashingineering.jetour.tboxcore.types.LogType
-import dashingineering.jetour.tboxcore.types.TBoxClientCallback
+import dashingineering.jetour.tboxcore.types.TBoxCallback
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -15,7 +15,7 @@ import java.net.Socket
 class TcpClient(
     private val host: String,
     private val port: Int,
-    private val callback: TBoxClientCallback
+    private val callback: TBoxCallback
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var socket: Socket? = null

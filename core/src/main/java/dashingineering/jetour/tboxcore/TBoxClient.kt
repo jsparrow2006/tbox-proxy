@@ -6,10 +6,12 @@ import dashingineering.jetour.tboxcore.discovery.TcpDiscovery
 import dashingineering.jetour.tboxcore.service.TBoxBridgeService
 import dashingineering.jetour.tboxcore.tcp.TcpClient
 import dashingineering.jetour.tboxcore.types.LogType
+import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.types.TBoxClientCallback
 import dashingineering.jetour.tboxcore.types.TBoxCommand
 import dashingineering.jetour.tboxcore.util.ByteConverter
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
+import dashingineering.jetour.tboxcore.util.TBoxReceivedMessage
 import dashingineering.jetour.tboxcore.util.startForegroundServiceCompat
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -141,10 +143,10 @@ class TBoxClient(
         tcpClient = TcpClient(
             host = cfg.host,
             port = cfg.tcpPort,
-            callback = object : TBoxClientCallback {
+            callback = object : TBoxCallback {
                 override fun onDataReceived(data: ByteArray) {
                     // Данные от сервера (UDP → TCP → мы)
-                    callback.onDataReceived(data)
+                    callback.onDataReceived(TBoxReceivedMessage(data))
                 }
 
                 override fun onLogMessage(type: LogType, tag: String, message: String) {
@@ -185,9 +187,9 @@ class TBoxClient(
             tcpClient = TcpClient(
                 host = cfg.host,
                 port = cfg.tcpPort,
-                callback = object : TBoxClientCallback {
+                callback = object : TBoxCallback {
                     override fun onDataReceived(data: ByteArray) {
-                        callback.onDataReceived(data)
+                        callback.onDataReceived(TBoxReceivedMessage(data))
                     }
 
                     override fun onLogMessage(type: LogType, tag: String, message: String) {

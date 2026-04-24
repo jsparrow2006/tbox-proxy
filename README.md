@@ -85,11 +85,11 @@ val client = TBoxClient(
 val client = TBoxClient(
     context = applicationContext,
     callback = object : TBoxClientCallback {
-        override fun onDataReceived(data: ByteArray) {
+        override fun onDataReceived(message: TBoxReceivedMessage) {
             //Get received data from T-Box
             //For to get raw ByteArray for logging
-            //data.toLogString(0) without lenth limit
-            //data.toLogString(100) with lenth limit
+            //data.getRawData().toLogString(0) without lenth limit
+            //data.getRawData().toLogString(100) with lenth limit
         }
 
         override fun onLogMessage(type: LogType, tag: String, message: String) {

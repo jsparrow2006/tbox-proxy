@@ -117,4 +117,40 @@ object ByteConverter {
             else -> "${prefix}${toHex()} (${size} bytes)"
         }
     }
+
+    fun String.hexToByteArray(): ByteArray {
+        val clean = replace(Regex("\\s"), "")
+        require(clean.length % 2 == 0) { "The hex string must contain an even number of characters" }
+
+        return ByteArray(clean.length / 2) { i ->
+            val high = clean[i * 2].digitToInt(16)
+            val low = clean[i * 2 + 1].digitToInt(16)
+            ((high shl 4) or low).toByte()
+        }
+    }
+
+    fun checkPacket(data: ByteArray): Boolean {
+        if (data.isEmpty() || data.size < 14) {
+            return false
+        }
+        if (data[0] != 0x8E.toByte() || data[1] != 0x5D.toByte()) {
+            return false
+        }
+        return true
+    }
+
+    fun extractDataLength(data: ByteArray): Int {
+        return ((data[10].toInt() and 0xFF) shl 8) or (data[11].toInt() and 0xFF)
+    }
+
+    fun checkLength(data: ByteArray, length: Int): Boolean {
+        return data.size - 14 >= length
+    }
+
+    fun extractData(data: ByteArray, length: Int): ByteArray {
+        if (xorSum(data.copyOfRange(0, 13 + length)) != data[13+length]) {
+            return ByteArray(0)
+        }
+        return data.copyOfRange(13, 13+length)
+    }
 }

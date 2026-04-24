@@ -1,7 +1,7 @@
 package dashingineering.jetour.tboxcore.udp
 
 import dashingineering.jetour.tboxcore.types.LogType
-import dashingineering.jetour.tboxcore.types.TBoxClientCallback
+import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
@@ -16,7 +16,7 @@ class UdpSocketManager(
     private val localPort: Int,
     private val remotePort: Int,
     private val remoteAddress: InetAddress,
-    private val callback: TBoxClientCallback
+    private val callback: TBoxCallback
 ) {
 
     private var socket: DatagramSocket? = null

@@ -3,7 +3,6 @@ package dashengineering.jetour.TboxCore.demo
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -20,9 +19,11 @@ import com.dashing.tbox.proxy.demo.R
 import dashingineering.jetour.tboxcore.types.LogType
 import dashingineering.jetour.tboxcore.TBoxClient
 import dashingineering.jetour.tboxcore.constants.TBoxConstants
+import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.types.TBoxClientCallback
 import dashingineering.jetour.tboxcore.types.TBoxCommand
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
+import dashingineering.jetour.tboxcore.util.TBoxReceivedMessage
 
 val command1 = TBoxCommand(
     tid = TBoxConstants.CRT_CODE,
@@ -117,7 +118,7 @@ class MainActivity : AppCompatActivity() {
         recyclerView.layoutManager = LinearLayoutManager(this)
         adapter = PacketAdapter(recyclerView)
         recyclerView.adapter = adapter
-        val hVersion = findViewById<TextView>(R.id.hVer)
+//        val hVersion = findViewById<TextView>(R.id.hVer)
         val connectButton = findViewById<Button>(R.id.btnConnect)
         val saveLogButton = findViewById<Button>(R.id.saveLogs)
 
@@ -135,11 +136,11 @@ class MainActivity : AppCompatActivity() {
         tboxClient = TBoxClient(
             context = applicationContext,
             callback = object : TBoxClientCallback {
-                override fun onDataReceived(data: ByteArray) {
+                override fun onDataReceived(message: TBoxReceivedMessage) {
                     //Get received data from T-Box
                     //For to get raw ByteArray for logging data.toLogString(0)
-                    adapter.addPacket(ITBoxMessage("📥", data.toLogString(0)))
-                    Log.d("QQQ", "📥 Received data: ${data.toLogString(0)}")
+                    adapter.addPacket(ITBoxMessage("📥", "tid: ${message.sid} sid: ${message.sid}${message.getRawData().toLogString(0)}"))
+                    Log.d("QQQ", "📥 Received data: ${message.getRawData().toLogString(0)}")
                 }
 
                 override fun onLogMessage(type: LogType, tag: String, message: String) {

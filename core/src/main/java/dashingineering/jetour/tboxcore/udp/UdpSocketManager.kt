@@ -30,7 +30,7 @@ class UdpSocketManager(
 
     fun initialize(): Boolean {
         return try {
-            log(LogType.ERROR, "UdpSocketManager", "Try connect to port $localPort")
+            log(LogType.INFO, "UdpSocketManager", "Try connect to port $localPort")
             socket = DatagramSocket(localPort).apply { soTimeout = 1000 }
             log(LogType.INFO, "UdpSocketManager", "Initialized on port $localPort")
             true

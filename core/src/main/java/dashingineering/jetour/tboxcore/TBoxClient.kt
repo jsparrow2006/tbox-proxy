@@ -9,6 +9,7 @@ import dashingineering.jetour.tboxcore.types.LogType
 import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.types.TBoxClientCallback
 import dashingineering.jetour.tboxcore.types.TBoxCommand
+import dashingineering.jetour.tboxcore.types.TBoxStatus
 import dashingineering.jetour.tboxcore.util.ByteConverter
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
 import dashingineering.jetour.tboxcore.util.TBoxReceivedMessage
@@ -145,7 +146,6 @@ class TBoxClient(
             port = cfg.tcpPort,
             callback = object : TBoxCallback {
                 override fun onDataReceived(data: ByteArray) {
-                    // Данные от сервера (UDP → TCP → мы)
                     callback.onDataReceived(TBoxReceivedMessage(data))
                 }
 
@@ -155,6 +155,10 @@ class TBoxClient(
 
                 override fun onConnectionChanged(connected: Boolean) {
                     callback.onConnectionChanged(connected)
+                }
+
+                override fun onStatusChanged(status: TBoxStatus) {
+                    callback.onStatusChanged(status)
                 }
             }
         )
@@ -198,6 +202,10 @@ class TBoxClient(
 
                     override fun onConnectionChanged(connected: Boolean) {
                         callback.onConnectionChanged(connected)
+                    }
+
+                    override fun onStatusChanged(status: TBoxStatus) {
+                        callback.onStatusChanged(status)
                     }
                 }
             )

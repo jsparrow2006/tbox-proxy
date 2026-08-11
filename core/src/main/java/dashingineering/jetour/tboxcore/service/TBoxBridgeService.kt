@@ -10,6 +10,8 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import dashingineering.jetour.tboxcore.types.LogType
 import dashingineering.jetour.tboxcore.types.TBoxCallback
+import dashingineering.jetour.tboxcore.types.TBoxStatus
+import dashingineering.jetour.tboxcore.types.TBoxStatusType
 import dashingineering.jetour.tboxcore.tcp.TcpServer
 import dashingineering.jetour.tboxcore.udp.UdpSocketManager
 import kotlinx.coroutines.*
@@ -36,12 +38,16 @@ class TBoxBridgeService : Service() {
     private var isForegroundStarted = false
 
     private val bridgeCallback = object : TBoxCallback {
-        override fun onDataReceived( data: ByteArray) {
+        override fun onDataReceived(data: ByteArray) {
             tcpServer?.broadcastToClients(data)
             log(LogType.DEBUG, "TBoxService", "↻ Broadcast to TCP clients: ${data.size} bytes")
         }
         override fun onLogMessage(type: LogType, tag: String, message: String) {
             android.util.Log.println(type.ordinal + 2, tag, message)
+        }
+        override fun onStatusChanged(status: TBoxStatus) {
+            tcpServer?.broadcastStatus(status)
+            android.util.Log.println(android.util.Log.INFO, "TBoxService", "Status: ${status.type} - ${status.message}")
         }
     }
 
@@ -84,9 +90,11 @@ class TBoxBridgeService : Service() {
 
             if (!udpManager?.initialize()!!) {
                 log(LogType.ERROR, "TBoxService", "UDP initialization failed")
+                bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.UDP_BIND_FAILED, "UDP init failed on port $localPort"))
                 stopSelf()
                 return
             }
+            bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.UDP_BIND_SUCCESS, "UDP bound on port $localPort"))
             udpManager?.startReceiving()
             log(LogType.INFO, "TBoxService", "UDP manager started on port $localPort")
 
@@ -94,15 +102,19 @@ class TBoxBridgeService : Service() {
             val tcpStarted = tcpServer?.start() == true
             if (!tcpStarted) {
                 log(LogType.ERROR, "TBoxService", "TCP server failed to start")
+                bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.TCP_SERVER_ERROR, "TCP server failed on port $tcpPort"))
                 stopSelf()
                 return
             }
 
+            bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.TCP_SERVER_STARTED, "TCP server on port $tcpPort"))
+            bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.SERVICE_STARTED, "Bridge fully started (TCP:$tcpPort ↔ UDP:$localPort)"))
             log(LogType.INFO, "TBoxService", "TCP server started on port $tcpPort")
             log(LogType.INFO, "TBoxService", "Bridge fully started (TCP:$tcpPort ↔ UDP:$localPort)")
 
         } catch (e: Exception) {
             log(LogType.ERROR, "TBoxService", "Bridge start failed: ${e.javaClass.simpleName}: ${e.message}")
+            bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.SERVICE_ERROR, "Bridge start failed", e.message))
             stopSelf()
         }
     }
@@ -137,6 +149,8 @@ class TBoxBridgeService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+
+        bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.SERVICE_STOPPED, "Service shutting down"))
 
         serviceScope.cancel()
         runBlocking {

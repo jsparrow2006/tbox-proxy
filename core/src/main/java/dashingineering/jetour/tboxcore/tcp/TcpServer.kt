@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import dashingineering.jetour.tboxcore.types.LogType
 import dashingineering.jetour.tboxcore.types.TBoxCallback
+import dashingineering.jetour.tboxcore.types.TBoxStatus
 import dashingineering.jetour.tboxcore.udp.UdpSocketManager
 import kotlinx.coroutines.*
 import java.io.DataInputStream
@@ -89,7 +90,7 @@ class TcpServer(
             return
         }
 
-        val frame = FrameCodec.encode(data)
+        val frame = FrameCodec.encode(data, FrameCodec.TYPE_DATA)
         scope?.launch {
             var sentCount = 0
             val deadClients = mutableListOf<ClientHandler>()
@@ -100,12 +101,10 @@ class TcpServer(
                     sentCount++
                 } catch (e: Exception) {
                     onLogMessage(LogType.WARN, "TcpServer", "Send to client failed: ${e.message}")
-                    // Клиент мёртв — пометим на удаление
                     deadClients.add(client)
                 }
             }
             
-            // Удаляем мёртвых клиентов
             deadClients.forEach { client ->
                 client.close()
                 clients.remove(client)
@@ -116,6 +115,34 @@ class TcpServer(
             }
             
             onLogMessage(LogType.DEBUG, "TcpServer", "Broadcast to $sentCount/${clients.size} clients: ${data.size} bytes")
+        }
+    }
+
+    fun broadcastStatus(status: TBoxStatus) {
+        if (clients.isEmpty()) {
+            onLogMessage(LogType.DEBUG, "TcpServer", "No clients to broadcast status to")
+            return
+        }
+
+        val frame = FrameCodec.encode(status.toByteArray(), FrameCodec.TYPE_STATUS)
+        scope?.launch {
+            val deadClients = mutableListOf<ClientHandler>()
+
+            clients.forEach { client ->
+                try {
+                    client.sendRaw(frame)
+                } catch (e: Exception) {
+                    onLogMessage(LogType.WARN, "TcpServer", "Status send to client failed: ${e.message}")
+                    deadClients.add(client)
+                }
+            }
+
+            deadClients.forEach { client ->
+                client.close()
+                clients.remove(client)
+            }
+
+            onLogMessage(LogType.DEBUG, "TcpServer", "Status broadcast to ${clients.size} clients: ${status.type}")
         }
     }
 

@@ -17,6 +17,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.dashing.tbox.proxy.demo.R
 import dashingineering.jetour.tboxcore.types.LogType
+import dashingineering.jetour.tboxcore.types.TBoxStatus
 import dashingineering.jetour.tboxcore.TBoxClient
 import dashingineering.jetour.tboxcore.constants.TBoxConstants
 import dashingineering.jetour.tboxcore.types.TBoxCallback
@@ -150,12 +151,9 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onConnectionChanged(connected: Boolean) {
-                    //Get connection library status
                     if (connected) {
                         connectButton.setText("Отключиться от T-BOX")
                         Handler(Looper.getMainLooper()).postDelayed({
-//                            adapter.addPacket(ITBoxMessage("📡", "Отправляем запрос на получение CAN данных"))
-//                            tboxClient.sendCommand(0x23.toByte(), 0x80.toByte(), 0x15, byteArrayOf(0x01, 0x02))
                             tboxClient.sendCommand(command1)
                             tboxClient.sendCommand(command2)
                             tboxClient.sendCommand(command3)
@@ -170,6 +168,11 @@ class MainActivity : AppCompatActivity() {
                     } else {
                         connectButton.setText("Подключиться к T-BOX")
                     }
+                }
+
+                override fun onStatusChanged(status: TBoxStatus) {
+                    Log.d("QQQ", "Status: ${status.type} - ${status.message}")
+                    adapter.addPacket(ITBoxMessage("${status.type.label}", status.message))
                 }
             }
         )

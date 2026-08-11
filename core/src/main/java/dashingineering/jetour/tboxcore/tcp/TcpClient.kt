@@ -4,6 +4,7 @@ import android.os.Handler
 import android.os.Looper
 import dashingineering.jetour.tboxcore.types.LogType
 import dashingineering.jetour.tboxcore.types.TBoxCallback
+import dashingineering.jetour.tboxcore.types.TBoxStatus
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -42,9 +43,14 @@ class TcpClient(
     }
 
     private fun onConnectionChanged(connected: Boolean) {
-        // Статус соединения тоже постим в main
         postToMain {
             callback.onConnectionChanged(connected)
+        }
+    }
+
+    private fun onStatusChanged(status: TBoxStatus) {
+        postToMain {
+            callback.onStatusChanged(status)
         }
     }
 
@@ -99,7 +105,18 @@ class TcpClient(
                     while (processed < offset) {
                         when (val result = FrameCodec.decode(buffer, processed)) {
                             is FrameCodec.DecodeResult.Success -> {
-                                onDataReceived(result.data)
+                                when (result.type) {
+                                    FrameCodec.TYPE_DATA -> onDataReceived(result.data)
+                                    FrameCodec.TYPE_STATUS -> {
+                                        val status = TBoxStatus.fromByteArray(result.data)
+                                        if (status != null) {
+                                            onStatusChanged(status)
+                                        } else {
+                                            onLogMessage(LogType.WARN, "TcpClient", "Failed to parse status frame")
+                                        }
+                                    }
+                                    else -> onLogMessage(LogType.WARN, "TcpClient", "Unknown frame type: ${result.type}")
+                                }
                                 processed += result.consumed
                             }
                             is FrameCodec.DecodeResult.Incomplete -> {

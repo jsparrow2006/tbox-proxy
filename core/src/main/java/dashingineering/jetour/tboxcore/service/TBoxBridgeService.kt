@@ -30,12 +30,16 @@ class TBoxBridgeService : Service() {
         const val DEFAULT_TCP_PORT = 1104
         private const val NOTIFICATION_ID = 3001
         private const val CHANNEL_ID = "TBoxBridgeChannel"
+        private const val TBOX_TIMEOUT_MS = 5000L
+        private const val WATCHDOG_CHECK_INTERVAL_MS = 1000L
+        private const val WATCHDOG_INITIAL_GRACE_MS = 5000L
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var tcpServer: TcpServer? = null
     private var udpManager: UdpSocketManager? = null
     private var isForegroundStarted = false
+    private var watchdogJob: Job? = null
 
     private val bridgeCallback = object : TBoxCallback {
         override fun onDataReceived(data: ByteArray) {
@@ -112,6 +116,8 @@ class TBoxBridgeService : Service() {
             log(LogType.INFO, "TBoxService", "TCP server started on port $tcpPort")
             log(LogType.INFO, "TBoxService", "Bridge fully started (TCP:$tcpPort ↔ UDP:$localPort)")
 
+            startWatchdog()
+
         } catch (e: Exception) {
             log(LogType.ERROR, "TBoxService", "Bridge start failed: ${e.javaClass.simpleName}: ${e.message}")
             bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.SERVICE_ERROR, "Bridge start failed", e.message))
@@ -147,9 +153,33 @@ class TBoxBridgeService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun startWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = serviceScope.launch {
+            delay(WATCHDOG_INITIAL_GRACE_MS)
+            log(LogType.INFO, "TBoxService", "Watchdog started, timeout=${TBOX_TIMEOUT_MS}ms")
+            while (isActive) {
+                val lastReceived = udpManager?.lastDataReceivedTime ?: 0L
+                if (lastReceived > 0) {
+                    val elapsed = System.currentTimeMillis() - lastReceived
+                    if (elapsed > TBOX_TIMEOUT_MS) {
+                        log(LogType.WARN, "TBoxService", "TBox not responding, last data ${elapsed}ms ago")
+                        bridgeCallback.onStatusChanged(
+                            TBoxStatus(TBoxStatusType.UDP_RECEIVE_ERROR, "TBox not responding (${elapsed}ms silence)")
+                        )
+                        stopSelf()
+                        return@launch
+                    }
+                }
+                delay(WATCHDOG_CHECK_INTERVAL_MS)
+            }
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
 
+        watchdogJob?.cancel()
         bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.SERVICE_STOPPED, "Service shutting down"))
 
         serviceScope.cancel()

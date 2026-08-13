@@ -9,5 +9,9 @@ enum class TBoxStatusType(val label: String) {
     SERVICE_STOPPED("Service stopped"),
     SERVICE_ERROR("Service error"),
     TCP_SERVER_STARTED("TCP server started"),
-    TCP_SERVER_ERROR("TCP server error")
+    TCP_SERVER_ERROR("TCP server error"),
+    CONNECTING("Connecting"),
+    CONNECTED("Connected"),
+    DISCONNECTED("Disconnected"),
+    LOG("LOG")
 }

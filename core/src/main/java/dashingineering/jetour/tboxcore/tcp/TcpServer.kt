@@ -119,10 +119,7 @@ class TcpServer(
     }
 
     fun broadcastStatus(status: TBoxStatus) {
-        if (clients.isEmpty()) {
-            onLogMessage(LogType.DEBUG, "TcpServer", "No clients to broadcast status to")
-            return
-        }
+        if (clients.isEmpty()) return
 
         val frame = FrameCodec.encode(status.toByteArray(), FrameCodec.TYPE_STATUS)
         scope?.launch {
@@ -131,8 +128,7 @@ class TcpServer(
             clients.forEach { client ->
                 try {
                     client.sendRaw(frame)
-                } catch (e: Exception) {
-                    onLogMessage(LogType.WARN, "TcpServer", "Status send to client failed: ${e.message}")
+                } catch (_: Exception) {
                     deadClients.add(client)
                 }
             }
@@ -141,8 +137,6 @@ class TcpServer(
                 client.close()
                 clients.remove(client)
             }
-
-            onLogMessage(LogType.DEBUG, "TcpServer", "Status broadcast to ${clients.size} clients: ${status.type}")
         }
     }
 

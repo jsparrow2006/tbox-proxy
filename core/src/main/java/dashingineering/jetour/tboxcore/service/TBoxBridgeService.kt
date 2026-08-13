@@ -8,12 +8,14 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import dashingineering.jetour.tboxcore.constants.TBoxConstants
 import dashingineering.jetour.tboxcore.types.LogType
 import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.types.TBoxStatus
 import dashingineering.jetour.tboxcore.types.TBoxStatusType
 import dashingineering.jetour.tboxcore.tcp.TcpServer
 import dashingineering.jetour.tboxcore.udp.UdpSocketManager
+import dashingineering.jetour.tboxcore.util.ByteConverter
 import kotlinx.coroutines.*
 import java.net.InetAddress
 
@@ -44,10 +46,10 @@ class TBoxBridgeService : Service() {
     private val bridgeCallback = object : TBoxCallback {
         override fun onDataReceived(data: ByteArray) {
             tcpServer?.broadcastToClients(data)
-            log(LogType.DEBUG, "TBoxService", "↻ Broadcast to TCP clients: ${data.size} bytes")
         }
         override fun onLogMessage(type: LogType, tag: String, message: String) {
             android.util.Log.println(type.ordinal + 2, tag, message)
+            tcpServer?.broadcastStatus(TBoxStatus(TBoxStatusType.LOG, "[$tag] $message"))
         }
         override fun onStatusChanged(status: TBoxStatus) {
             tcpServer?.broadcastStatus(status)
@@ -116,6 +118,8 @@ class TBoxBridgeService : Service() {
             log(LogType.INFO, "TBoxService", "TCP server started on port $tcpPort")
             log(LogType.INFO, "TBoxService", "Bridge fully started (TCP:$tcpPort ↔ UDP:$localPort)")
 
+            sendWakeUpCommand()
+
             startWatchdog()
 
         } catch (e: Exception) {
@@ -153,23 +157,40 @@ class TBoxBridgeService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private suspend fun sendWakeUpCommand() {
+        val data = byteArrayOf(0x00, 0x00, 0x01, 0x05)
+        val header = ByteConverter.fillHeader(data.size, TBoxConstants.CRT_CODE, TBoxConstants.SELF_CODE, 0x12)
+        val packet = header + data + ByteConverter.xorSum(header + data)
+
+        log(LogType.INFO, "TBoxService", "Sending wake-up command (getHW)")
+        val sent = udpManager?.send(packet) == true
+        if (sent) {
+            log(LogType.INFO, "TBoxService", "Wake-up command sent")
+        } else {
+            log(LogType.WARN, "TBoxService", "Failed to send wake-up command")
+        }
+    }
+
     private fun startWatchdog() {
         watchdogJob?.cancel()
         watchdogJob = serviceScope.launch {
+            val startTime = System.currentTimeMillis()
             delay(WATCHDOG_INITIAL_GRACE_MS)
             log(LogType.INFO, "TBoxService", "Watchdog started, timeout=${TBOX_TIMEOUT_MS}ms")
             while (isActive) {
                 val lastReceived = udpManager?.lastDataReceivedTime ?: 0L
-                if (lastReceived > 0) {
-                    val elapsed = System.currentTimeMillis() - lastReceived
-                    if (elapsed > TBOX_TIMEOUT_MS) {
-                        log(LogType.WARN, "TBoxService", "TBox not responding, last data ${elapsed}ms ago")
-                        bridgeCallback.onStatusChanged(
-                            TBoxStatus(TBoxStatusType.UDP_RECEIVE_ERROR, "TBox not responding (${elapsed}ms silence)")
-                        )
-                        stopSelf()
-                        return@launch
-                    }
+                val elapsed = if (lastReceived > 0) {
+                    System.currentTimeMillis() - lastReceived
+                } else {
+                    System.currentTimeMillis() - startTime
+                }
+                if (elapsed > TBOX_TIMEOUT_MS) {
+                    log(LogType.WARN, "TBoxService", "TBox not responding, silence=${elapsed}ms")
+                    bridgeCallback.onStatusChanged(
+                        TBoxStatus(TBoxStatusType.UDP_RECEIVE_ERROR, "TBox not responding (${elapsed}ms silence)")
+                    )
+                    stopSelf()
+                    return@launch
                 }
                 delay(WATCHDOG_CHECK_INTERVAL_MS)
             }

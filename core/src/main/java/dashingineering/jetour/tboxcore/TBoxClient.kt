@@ -10,6 +10,7 @@ import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.types.TBoxClientCallback
 import dashingineering.jetour.tboxcore.types.TBoxCommand
 import dashingineering.jetour.tboxcore.types.TBoxStatus
+import dashingineering.jetour.tboxcore.types.TBoxStatusType
 import dashingineering.jetour.tboxcore.util.ByteConverter
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
 import dashingineering.jetour.tboxcore.util.TBoxReceivedMessage
@@ -70,13 +71,17 @@ class TBoxClient(
         const val DEFAULT_REMOTE_ADDRESS = "192.168.225.1"
         const val DEFAULT_TCP_PORT = 1104
         const val DEFAULT_HOST = "127.0.0.1"
+        private const val RECONNECT_DELAY_MS = 3000L
     }
 
     private var config: Config? = null
-    private var tcpClient: TcpClient? = null  // Для подключения к серверу (в любом режиме)
+    private var tcpClient: TcpClient? = null
     private var isServerMode = false
     private var scope: CoroutineScope? = null
     private var isInitialized = false
+    private var isReconnecting = false
+    private var reconnectJob: Job? = null
+    private var isPhysicallyConnected = false
 
     // Очередь для последовательной отправки команд
     private lateinit var sendQueue: Channel<ByteArray>
@@ -140,27 +145,84 @@ class TBoxClient(
         }
     }
 
+    private fun createTcpCallback(): TBoxCallback {
+        return object : TBoxCallback {
+            override fun onDataReceived(data: ByteArray) {
+                if (!isPhysicallyConnected) {
+                    isPhysicallyConnected = true
+                    callback.onStatusChanged(TBoxStatus(TBoxStatusType.CONNECTED, "TBox is responding"))
+                    callback.onConnectionChanged(true)
+                }
+                callback.onDataReceived(TBoxReceivedMessage(data))
+            }
+
+            override fun onLogMessage(type: LogType, tag: String, message: String) {
+                callback.onLogMessage(type, "TcpClient.$tag", message)
+            }
+
+            override fun onConnectionChanged(connected: Boolean) {
+                if (connected) {
+                    callback.onStatusChanged(TBoxStatus(TBoxStatusType.CONNECTING, "TCP connected, waiting for TBox..."))
+                } else {
+                    if (isPhysicallyConnected) {
+                        isPhysicallyConnected = false
+                        callback.onStatusChanged(TBoxStatus(TBoxStatusType.DISCONNECTED, "Connection lost"))
+                        callback.onConnectionChanged(false)
+                    }
+                    if (isInitialized) {
+                        scheduleReconnect()
+                    }
+                }
+            }
+
+            override fun onStatusChanged(status: TBoxStatus) {
+                if (status.type == TBoxStatusType.LOG) {
+                    callback.onLogMessage(LogType.DEBUG, "Service", status.message)
+                } else {
+                    callback.onStatusChanged(status)
+                }
+            }
+        }
+    }
+
+    private fun scheduleReconnect() {
+        if (isReconnecting) return
+        isReconnecting = true
+        isPhysicallyConnected = false
+
+        log(LogType.INFO, "TBoxClient", "Connection lost, reconnecting in ${RECONNECT_DELAY_MS}ms...")
+
+        // Очищаем текущее TCP-соединение
+        tcpClient?.disconnect()
+        tcpClient = null
+        sendJob?.cancel()
+        sendJob = null
+
+        reconnectJob = scope?.launch {
+            delay(RECONNECT_DELAY_MS)
+
+            if (!isInitialized) {
+                isReconnecting = false
+                return@launch
+            }
+
+            log(LogType.INFO, "TBoxClient", "Attempting reconnect...")
+            isServerMode = false
+
+            try {
+                discoverAndConnect()
+            } catch (e: Exception) {
+                log(LogType.ERROR, "TBoxClient", "Reconnect failed: ${e.message}")
+            }
+            isReconnecting = false
+        }
+    }
+
     private suspend fun connectAsClient(cfg: Config) {
         tcpClient = TcpClient(
             host = cfg.host,
             port = cfg.tcpPort,
-            callback = object : TBoxCallback {
-                override fun onDataReceived(data: ByteArray) {
-                    callback.onDataReceived(TBoxReceivedMessage(data))
-                }
-
-                override fun onLogMessage(type: LogType, tag: String, message: String) {
-                    callback.onLogMessage(type, "TcpClient.$tag", message)
-                }
-
-                override fun onConnectionChanged(connected: Boolean) {
-                    callback.onConnectionChanged(connected)
-                }
-
-                override fun onStatusChanged(status: TBoxStatus) {
-                    callback.onStatusChanged(status)
-                }
-            }
+            callback = createTcpCallback()
         )
 
         val connected = tcpClient?.connect() == true
@@ -168,7 +230,6 @@ class TBoxClient(
             log(LogType.WARN, "TBoxClient", "Failed to connect to server, trying to start local server")
             startAsServer(cfg)
         } else {
-            // Запускаем обработчик очереди отправки
             startSendProcessor()
         }
     }
@@ -191,30 +252,12 @@ class TBoxClient(
             tcpClient = TcpClient(
                 host = cfg.host,
                 port = cfg.tcpPort,
-                callback = object : TBoxCallback {
-                    override fun onDataReceived(data: ByteArray) {
-                        callback.onDataReceived(TBoxReceivedMessage(data))
-                    }
-
-                    override fun onLogMessage(type: LogType, tag: String, message: String) {
-                        callback.onLogMessage(type, "TcpClient.$tag", message)
-                    }
-
-                    override fun onConnectionChanged(connected: Boolean) {
-                        callback.onConnectionChanged(connected)
-                    }
-
-                    override fun onStatusChanged(status: TBoxStatus) {
-                        callback.onStatusChanged(status)
-                    }
-                }
+                callback = createTcpCallback()
             )
 
             val connected = tcpClient?.connect() == true
             if (connected) {
                 log(LogType.INFO, "TBoxClient", "Connected to local server (loopback)")
-                callback.onConnectionChanged(true)
-                // Запускаем обработчик очереди отправки
                 startSendProcessor()
             } else {
                 log(LogType.ERROR, "TBoxClient", "Failed to connect to local server")
@@ -325,7 +368,7 @@ class TBoxClient(
     }
 
     fun isConnected(): Boolean {
-        return tcpClient?.isConnected == true
+        return isPhysicallyConnected
     }
 
     fun getMode(): String = if (isServerMode) "SERVER" else "CLIENT"
@@ -335,7 +378,12 @@ class TBoxClient(
 
         log(LogType.INFO, "TBoxClient", "Destroying...")
 
-        // Отменяем обработчик очереди
+        isInitialized = false
+        isPhysicallyConnected = false
+        reconnectJob?.cancel()
+        reconnectJob = null
+        isReconnecting = false
+
         sendJob?.cancel()
         sendJob = null
         if (::sendQueue.isInitialized) {
@@ -357,7 +405,6 @@ class TBoxClient(
         scope = null
         config = null
         isServerMode = false
-        isInitialized = false
 
         log(LogType.INFO, "TBoxClient", "Destroyed complete")
     }

@@ -24,13 +24,17 @@ class UdpSocketManager(
     private var isReceiving = false
     private val sendMutex = Mutex()
 
+    @Volatile
+    var lastDataReceivedTime: Long = 0L
+        private set
+
     private val log: (LogType, String, String) -> Unit = { type, tag, msg ->
         callback.onLogMessage(type, tag, msg)
     }
 
     fun initialize(): Boolean {
         return try {
-            log(LogType.ERROR, "UdpSocketManager", "Try connect to port $localPort")
+            log(LogType.INFO, "UdpSocketManager", "Try connect to port $localPort")
             socket = DatagramSocket(localPort).apply { soTimeout = 1000 }
             log(LogType.INFO, "UdpSocketManager", "Initialized on port $localPort")
             true
@@ -73,6 +77,7 @@ class UdpSocketManager(
                         "← UDP received ${data.size} bytes from ${packet.address}:${packet.port}: ${data.toLogString()}"
                     )
 
+                    lastDataReceivedTime = System.currentTimeMillis()
                     callback.onDataReceived(data)
 
                 } catch (e: SocketTimeoutException) {

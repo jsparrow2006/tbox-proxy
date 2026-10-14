@@ -5,20 +5,21 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
-import dashingineering.jetour.tboxcore.constants.TBoxConstants
+import androidx.core.app.ServiceCompat
+import dashingineering.jetour.tboxcore.net.TBoxNetworkTracker
 import dashingineering.jetour.tboxcore.types.LogType
-import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.types.TBoxStatus
-import dashingineering.jetour.tboxcore.types.TBoxStatusType
-import dashingineering.jetour.tboxcore.tcp.TcpServer
-import dashingineering.jetour.tboxcore.udp.UdpSocketManager
-import dashingineering.jetour.tboxcore.util.ByteConverter
-import kotlinx.coroutines.*
 import java.net.InetAddress
 
+/**
+ * Foreground-сервис хоста моста. Запускается [dashingineering.jetour.tboxcore.TBoxClient],
+ * если хоста нет. Вся логика — в [TBoxBridge].
+ */
 class TBoxBridgeService : Service() {
     companion object {
         const val ACTION_START = "dashingineering.jetour.tboxcore.service.START"
@@ -26,107 +27,105 @@ class TBoxBridgeService : Service() {
         const val EXTRA_REMOTE_PORT = "remote_port"
         const val EXTRA_REMOTE_ADDRESS = "remote_address"
         const val EXTRA_TCP_PORT = "tcp_port"
+        const val EXTRA_V3_TCP_PORT = "v3_tcp_port"
+        const val EXTRA_BIND_TO_TBOX_NETWORK = "bind_to_tbox_network"
         const val DEFAULT_LOCAL_PORT = 11048
         const val DEFAULT_REMOTE_PORT = 50047
         const val DEFAULT_REMOTE_ADDRESS = "192.168.225.1"
         const val DEFAULT_TCP_PORT = 1104
+        const val DEFAULT_V3_TCP_PORT = 1105
         private const val NOTIFICATION_ID = 3001
         private const val CHANNEL_ID = "TBoxBridgeChannel"
-        private const val TBOX_TIMEOUT_MS = 5000L
-        private const val WATCHDOG_CHECK_INTERVAL_MS = 1000L
-        private const val WATCHDOG_INITIAL_GRACE_MS = 5000L
+        private const val LOG_TAG = "TBoxBridge"
     }
 
-    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var tcpServer: TcpServer? = null
-    private var udpManager: UdpSocketManager? = null
+    private var bridge: TBoxBridge? = null
+    private var networkTracker: TBoxNetworkTracker? = null
     private var isForegroundStarted = false
-    private var watchdogJob: Job? = null
 
-    private val bridgeCallback = object : TBoxCallback {
-        override fun onDataReceived(data: ByteArray) {
-            tcpServer?.broadcastToClients(data)
+    private val logger: (LogType, String, String) -> Unit = { type, tag, message ->
+        val priority = when (type) {
+            LogType.VERBOSE -> Log.VERBOSE
+            LogType.DEBUG -> Log.DEBUG
+            LogType.INFO -> Log.INFO
+            LogType.WARN -> Log.WARN
+            LogType.ERROR -> Log.ERROR
         }
-        override fun onLogMessage(type: LogType, tag: String, message: String) {
-            android.util.Log.println(type.ordinal + 2, tag, message)
-            tcpServer?.broadcastStatus(TBoxStatus(TBoxStatusType.LOG, "[$tag] $message"))
+        if (priority >= Log.INFO || Log.isLoggable(LOG_TAG, priority)) {
+            Log.println(priority, LOG_TAG, "[$tag] $message")
         }
-        override fun onStatusChanged(status: TBoxStatus) {
-            tcpServer?.broadcastStatus(status)
-            android.util.Log.println(android.util.Log.INFO, "TBoxService", "Status: ${status.type} - ${status.message}")
-        }
+        if (priority >= Log.INFO) bridge?.forwardLog(type, tag, message)
     }
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        log(LogType.INFO, "TBoxService", "Service created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_START) {
-            val localPort = intent.getIntExtra(EXTRA_LOCAL_PORT, DEFAULT_LOCAL_PORT)
-            val remotePort = intent.getIntExtra(EXTRA_REMOTE_PORT, DEFAULT_REMOTE_PORT)
-            val addressStr = intent.getStringExtra(EXTRA_REMOTE_ADDRESS) ?: DEFAULT_REMOTE_ADDRESS
-            val tcpPort = intent.getIntExtra(EXTRA_TCP_PORT, DEFAULT_TCP_PORT)
-
-            if (!isForegroundStarted) {
-                startForeground(NOTIFICATION_ID, buildNotification())
-                isForegroundStarted = true
+        if (!isForegroundStarted) {
+            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                0
             }
-
-            serviceScope.launch {
-                startBridge(localPort, remotePort, addressStr, tcpPort)
-            }
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), type)
+            isForegroundStarted = true
         }
-        return START_STICKY
+        if (intent?.action != ACTION_START) {
+            if (bridge == null) stopSelf()
+            return START_NOT_STICKY
+        }
+        if (bridge == null) startBridge(intent)
+        return START_NOT_STICKY
     }
 
-    private suspend fun startBridge(
-        localPort: Int,
-        remotePort: Int,
-        addressStr: String,
-        tcpPort: Int
-    ) {
-        try {
-            log(LogType.INFO, "TBoxService", "Starting bridge initialization...")
-
-            val address = InetAddress.getByName(addressStr)
-            udpManager = UdpSocketManager(localPort, remotePort, address, bridgeCallback)
-
-            if (!udpManager?.initialize()!!) {
-                log(LogType.ERROR, "TBoxService", "UDP initialization failed")
-                bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.UDP_BIND_FAILED, "UDP init failed on port $localPort"))
-                stopSelf()
-                return
-            }
-            bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.UDP_BIND_SUCCESS, "UDP bound on port $localPort"))
-            udpManager?.startReceiving()
-            log(LogType.INFO, "TBoxService", "UDP manager started on port $localPort")
-
-            tcpServer = TcpServer(tcpPort, udpManager!!, bridgeCallback)
-            val tcpStarted = tcpServer?.start() == true
-            if (!tcpStarted) {
-                log(LogType.ERROR, "TBoxService", "TCP server failed to start")
-                bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.TCP_SERVER_ERROR, "TCP server failed on port $tcpPort"))
-                stopSelf()
-                return
-            }
-
-            bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.TCP_SERVER_STARTED, "TCP server on port $tcpPort"))
-            bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.SERVICE_STARTED, "Bridge fully started (TCP:$tcpPort ↔ UDP:$localPort)"))
-            log(LogType.INFO, "TBoxService", "TCP server started on port $tcpPort")
-            log(LogType.INFO, "TBoxService", "Bridge fully started (TCP:$tcpPort ↔ UDP:$localPort)")
-
-            sendWakeUpCommand()
-
-            startWatchdog()
-
+    private fun startBridge(intent: Intent) {
+        val remoteAddress = try {
+            InetAddress.getByName(intent.getStringExtra(EXTRA_REMOTE_ADDRESS) ?: DEFAULT_REMOTE_ADDRESS)
         } catch (e: Exception) {
-            log(LogType.ERROR, "TBoxService", "Bridge start failed: ${e.javaClass.simpleName}: ${e.message}")
-            bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.SERVICE_ERROR, "Bridge start failed", e.message))
+            logger(LogType.ERROR, "Service", "Invalid remote address: ${e.message}")
             stopSelf()
+            return
         }
+        val config = TBoxBridge.Config(
+            localPort = intent.getIntExtra(EXTRA_LOCAL_PORT, DEFAULT_LOCAL_PORT),
+            remotePort = intent.getIntExtra(EXTRA_REMOTE_PORT, DEFAULT_REMOTE_PORT),
+            remoteAddress = remoteAddress,
+            legacyTcpPort = intent.getIntExtra(EXTRA_TCP_PORT, DEFAULT_TCP_PORT),
+            v3TcpPort = intent.getIntExtra(EXTRA_V3_TCP_PORT, DEFAULT_V3_TCP_PORT),
+            hostPackage = packageName,
+            // adb shell setprop log.tag.TBoxBridge VERBOSE — лог каждого UDP-пакета
+            logPackets = Log.isLoggable(LOG_TAG, Log.VERBOSE)
+        )
+        val created = TBoxBridge(config, logger, ::logStatus)
+
+        val tracker = if (intent.getBooleanExtra(EXTRA_BIND_TO_TBOX_NETWORK, true)) {
+            TBoxNetworkTracker(applicationContext, remoteAddress, logger) { network, iface ->
+                created.onNetworkChanged(network?.let { n -> { socket -> n.bindSocket(socket) } }, iface)
+            }
+        } else {
+            null
+        }
+        // Трекер стартует до моста: если сеть TBox уже есть, первый же сокет будет привязан.
+        tracker?.start()
+
+        when (created.start()) {
+            TBoxBridge.StartResult.STARTED -> {
+                bridge = created
+                networkTracker = tracker
+            }
+            TBoxBridge.StartResult.UDP_BIND_FAILED,
+            TBoxBridge.StartResult.TCP_BIND_FAILED -> {
+                tracker?.stop()
+                created.stop()
+                stopSelf()
+            }
+        }
+    }
+
+    private fun logStatus(status: TBoxStatus) {
+        Log.i(LOG_TAG, "Status ${status.type}: ${status.message}")
     }
 
     private fun createNotificationChannel() {
@@ -157,66 +156,12 @@ class TBoxBridgeService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private suspend fun sendWakeUpCommand() {
-        val data = byteArrayOf(0x00, 0x00, 0x01, 0x05)
-        val header = ByteConverter.fillHeader(data.size, TBoxConstants.CRT_CODE, TBoxConstants.SELF_CODE, 0x12)
-        val packet = header + data + ByteConverter.xorSum(header + data)
-
-        log(LogType.INFO, "TBoxService", "Sending wake-up command (getHW)")
-        val sent = udpManager?.send(packet) == true
-        if (sent) {
-            log(LogType.INFO, "TBoxService", "Wake-up command sent")
-        } else {
-            log(LogType.WARN, "TBoxService", "Failed to send wake-up command")
-        }
-    }
-
-    private fun startWatchdog() {
-        watchdogJob?.cancel()
-        watchdogJob = serviceScope.launch {
-            val startTime = System.currentTimeMillis()
-            delay(WATCHDOG_INITIAL_GRACE_MS)
-            log(LogType.INFO, "TBoxService", "Watchdog started, timeout=${TBOX_TIMEOUT_MS}ms")
-            while (isActive) {
-                val lastReceived = udpManager?.lastDataReceivedTime ?: 0L
-                val elapsed = if (lastReceived > 0) {
-                    System.currentTimeMillis() - lastReceived
-                } else {
-                    System.currentTimeMillis() - startTime
-                }
-                if (elapsed > TBOX_TIMEOUT_MS) {
-                    log(LogType.WARN, "TBoxService", "TBox not responding, silence=${elapsed}ms")
-                    bridgeCallback.onStatusChanged(
-                        TBoxStatus(TBoxStatusType.UDP_RECEIVE_ERROR, "TBox not responding (${elapsed}ms silence)")
-                    )
-                    stopSelf()
-                    return@launch
-                }
-                delay(WATCHDOG_CHECK_INTERVAL_MS)
-            }
-        }
-    }
-
     override fun onDestroy() {
-        super.onDestroy()
-
-        watchdogJob?.cancel()
-        bridgeCallback.onStatusChanged(TBoxStatus(TBoxStatusType.SERVICE_STOPPED, "Service shutting down"))
-
-        serviceScope.cancel()
-        runBlocking {
-            tcpServer?.stop()
-            udpManager?.shutdown()
-        }
-
-        tcpServer = null
-        udpManager = null
+        networkTracker?.stop()
+        networkTracker = null
+        bridge?.stop()
+        bridge = null
         isForegroundStarted = false
-
-        log(LogType.INFO, "TBoxService", "Service destroyed")
-    }
-
-    private fun log(type: LogType, tag: String, message: String) {
-        bridgeCallback.onLogMessage(type, tag, message)
+        super.onDestroy()
     }
 }

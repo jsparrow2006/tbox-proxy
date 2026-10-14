@@ -1,127 +1,162 @@
 package dashingineering.jetour.tboxcore.udp
 
+import dashingineering.jetour.tboxcore.tcp.BridgeLogger
 import dashingineering.jetour.tboxcore.types.LogType
-import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import java.net.SocketException
 import java.net.SocketTimeoutException
 
-class UdpSocketManager(
+/** Настройка сокета перед использованием, например `Network.bindSocket`. */
+internal typealias SocketConfigurator = (DatagramSocket) -> Unit
+
+/**
+ * UDP-сокет моста. Сокет можно пересоздать ([reopen]) с другой привязкой к сети —
+ * цикл приёма при этом не останавливается.
+ */
+internal class UdpSocketManager(
     private val localPort: Int,
     private val remotePort: Int,
     private val remoteAddress: InetAddress,
-    private val callback: TBoxCallback
+    private val log: BridgeLogger,
+    /** Лог каждого пакета. Выключен по умолчанию: на ГУ это заметная нагрузка. */
+    private val logPackets: Boolean = false,
+    private val onData: (ByteArray) -> Unit
 ) {
-
+    @Volatile
     private var socket: DatagramSocket? = null
-    private var scope: CoroutineScope? = null
-    private var isReceiving = false
+    private val socketLock = Any()
     private val sendMutex = Mutex()
+    private var scope: CoroutineScope? = null
 
     @Volatile
     var lastDataReceivedTime: Long = 0L
         private set
 
-    private val log: (LogType, String, String) -> Unit = { type, tag, msg ->
-        callback.onLogMessage(type, tag, msg)
+    /** Текущий сокет настроен переданным [SocketConfigurator] (привязан к сети TBox). */
+    @Volatile
+    var isConfigured: Boolean = false
+        private set
+
+    /** `false`, если порт занят. Ошибка настройки не фатальна — сокет остаётся без неё. */
+    fun open(configure: SocketConfigurator? = null): Boolean = synchronized(socketLock) {
+        val created = createSocket() ?: return false
+        isConfigured = applyConfiguration(created, configure)
+        socket = created
+        log(LogType.INFO, TAG, "UDP bound on port $localPort")
+        true
     }
 
-    fun initialize(): Boolean {
+    /**
+     * Закрывает текущий сокет и открывает новый на том же порту с новой настройкой.
+     * Порт UDP освобождается сразу после `close()`, поэтому повторный bind не конфликтует.
+     */
+    fun reopen(configure: SocketConfigurator?): Boolean = synchronized(socketLock) {
+        socket?.close()
+        socket = null
+        isConfigured = false
+        val created = createSocket() ?: return false
+        isConfigured = applyConfiguration(created, configure)
+        socket = created
+        log(LogType.INFO, TAG, "UDP socket reopened on port $localPort, configured=$isConfigured")
+        true
+    }
+
+    private fun createSocket(): DatagramSocket? = try {
+        DatagramSocket(localPort).apply { soTimeout = RECEIVE_TIMEOUT_MS }
+    } catch (e: Exception) {
+        log(LogType.ERROR, TAG, "UDP bind on port $localPort failed: ${e.javaClass.simpleName}: ${e.message}")
+        null
+    }
+
+    private fun applyConfiguration(socket: DatagramSocket, configure: SocketConfigurator?): Boolean {
+        if (configure == null) return false
         return try {
-            log(LogType.INFO, "UdpSocketManager", "Try connect to port $localPort")
-            socket = DatagramSocket(localPort).apply { soTimeout = 1000 }
-            log(LogType.INFO, "UdpSocketManager", "Initialized on port $localPort")
+            configure(socket)
             true
-        } catch (e: SocketException) {
-            if (e.message?.contains("EADDRINUSE") == true) {
-                log(LogType.ERROR, "UdpSocketManager", "Address already in use on port $localPort, attempting to use different port")
-                try {
-                    socket = DatagramSocket(localPort).apply { soTimeout = 1000 }
-                } catch (e: SocketException) {
-                    log(LogType.ERROR, "UdpSocketManager", "Failed to bind port $localPort: ${e.message}")
-                    false
-                }
-            } else {
-                false
-            }
-        } as Boolean
+        } catch (e: Exception) {
+            log(LogType.ERROR, TAG, "UDP socket configuration failed: ${e.javaClass.simpleName}: ${e.message}")
+            false
+        }
     }
 
     fun startReceiving() {
-        if (isReceiving) return
-        isReceiving = true
-
-        scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
-        callback.onLogMessage(LogType.INFO, "UdpSocketManager", "Starting receive loop on port $localPort")
-
-        scope?.launch {
-            val buffer = ByteArray(4096) // Буфер под ваши пакеты
-
-            while (scope?.isActive == true && isReceiving) {
-                try {
-                    val packet = DatagramPacket(buffer, buffer.size)
-                    socket?.receive(packet)
-
-                    val data = packet.data.copyOfRange(packet.offset, packet.offset + packet.length)
-
-                    callback.onLogMessage(
-                        LogType.DEBUG,
-                        "UdpSocketManager",
-                        "← UDP received ${data.size} bytes from ${packet.address}:${packet.port}: ${data.toLogString()}"
-                    )
-
-                    lastDataReceivedTime = System.currentTimeMillis()
-                    callback.onDataReceived(data)
-
-                } catch (e: SocketTimeoutException) {
-                    // Таймаут — это нормально, просто продолжаем цикл
+        if (scope != null) return
+        val receiveScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        scope = receiveScope
+        receiveScope.launch {
+            val buffer = ByteArray(MAX_DATAGRAM)
+            val packet = DatagramPacket(buffer, buffer.size)
+            while (isActive) {
+                val current = socket
+                if (current == null || current.isClosed) {
+                    delay(SOCKET_WAIT_MS)
                     continue
+                }
+                try {
+                    packet.setData(buffer, 0, buffer.size)
+                    current.receive(packet)
+                    val data = buffer.copyOfRange(0, packet.length)
+                    lastDataReceivedTime = System.currentTimeMillis()
+                    if (logPackets) {
+                        log(LogType.DEBUG, TAG, "← UDP ${packet.address.hostAddress}:${packet.port} ${data.toLogString()}")
+                    }
+                    onData(data)
+                } catch (_: SocketTimeoutException) {
                 } catch (e: Exception) {
-                    if (isReceiving) {
-                        log(LogType.ERROR, "UdpSocketManager", "Receive error: ${e.message}")
+                    if (current === socket && isActive) {
+                        log(LogType.ERROR, TAG, "UDP receive error: ${e.javaClass.simpleName}: ${e.message}")
+                        delay(SOCKET_WAIT_MS)
                     }
                 }
             }
         }
     }
 
-    suspend fun send(data: ByteArray): Boolean {
-        val sock = socket ?: return false
-
-        return withContext(Dispatchers.IO) {
-            sendMutex.withLock {
-                try {
-                    val packet = DatagramPacket(data, data.size, remoteAddress, remotePort)
-                    sock.send(packet)
-
-                    callback.onLogMessage(
-                        LogType.DEBUG,
-                        "UdpSocketManager",
-                        "→ UDP sent ${data.size} bytes to $remoteAddress:$remotePort: ${data.toLogString()}"
-                    )
-                    true
-                } catch (e: Exception) {
-                    log(LogType.ERROR, "UdpSocketManager", "Send failed: ${e.message}")
-                    false
+    suspend fun send(data: ByteArray): Boolean = withContext(Dispatchers.IO) {
+        sendMutex.withLock {
+            val current = socket ?: return@withLock false.also {
+                log(LogType.ERROR, TAG, "UDP send skipped: no socket")
+            }
+            try {
+                current.send(DatagramPacket(data, data.size, remoteAddress, remotePort))
+                if (logPackets) {
+                    log(LogType.DEBUG, TAG, "→ UDP ${remoteAddress.hostAddress}:$remotePort ${data.toLogString()}")
                 }
+                true
+            } catch (e: Exception) {
+                log(LogType.ERROR, TAG, "UDP send failed: ${e.javaClass.simpleName}: ${e.message}")
+                false
             }
         }
     }
 
     fun shutdown() {
-        isReceiving = false
         scope?.cancel()
-        socket?.close()
-        socket = null
-        log(LogType.INFO, "UdpSocketManager", "Shutdown complete")
+        scope = null
+        synchronized(socketLock) {
+            socket?.close()
+            socket = null
+        }
     }
 
-    fun isRunning(): Boolean = socket?.isClosed == false && isReceiving
+    fun isRunning(): Boolean = scope != null && socket?.isClosed == false
+
+    private companion object {
+        const val TAG = "UdpSocketManager"
+        const val RECEIVE_TIMEOUT_MS = 1000
+        const val SOCKET_WAIT_MS = 200L
+        const val MAX_DATAGRAM = 65_535
+    }
 }

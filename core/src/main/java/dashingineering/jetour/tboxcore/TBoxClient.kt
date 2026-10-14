@@ -2,58 +2,50 @@ package dashingineering.jetour.tboxcore
 
 import android.content.Context
 import android.content.Intent
-import dashingineering.jetour.tboxcore.discovery.TcpDiscovery
+import android.os.Handler
+import android.os.Looper
 import dashingineering.jetour.tboxcore.service.TBoxBridgeService
-import dashingineering.jetour.tboxcore.tcp.TcpClient
+import dashingineering.jetour.tboxcore.tcp.BridgeConnection
 import dashingineering.jetour.tboxcore.types.LogType
-import dashingineering.jetour.tboxcore.types.TBoxCallback
 import dashingineering.jetour.tboxcore.types.TBoxClientCallback
 import dashingineering.jetour.tboxcore.types.TBoxCommand
+import dashingineering.jetour.tboxcore.types.TBoxHostInfo
 import dashingineering.jetour.tboxcore.types.TBoxStatus
 import dashingineering.jetour.tboxcore.types.TBoxStatusType
+import dashingineering.jetour.tboxcore.types.TBoxWireProtocol
 import dashingineering.jetour.tboxcore.util.ByteConverter
 import dashingineering.jetour.tboxcore.util.ByteConverter.toLogString
 import dashingineering.jetour.tboxcore.util.TBoxReceivedMessage
 import dashingineering.jetour.tboxcore.util.startForegroundServiceCompat
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
-import java.net.InetAddress
-import kotlin.collections.plus
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.random.Random
 
 /**
- * 🎯 Главная точка входа в библиотеку TBoxCore
+ * 🎯 Главная точка входа в библиотеку TBoxCore.
  *
- * Принцип работы:
- * 1. При создании экземпляра проверяется наличие TCP-сервера на порту
- * 2. Если сервер есть → подключаемся как клиент
- * 3. Если нет → запускаем локальный сервис-сервер
- * 4. Все данные передаются как raw ByteArray
+ * Порядок подключения:
+ * 1. Хост 3.x на порту [v3TcpPort] → рукопожатие, полный функционал.
+ * 2. Хост 1.x/2.x на порту [tcpPort] → режим совместимости (статус [TBoxStatusType.LEGACY_HOST]):
+ *    UDP-сокет хоста не привязан к сети TBox, статусов v3 и [getHostInfo] с деталями нет.
+ * 3. Хоста нет → запускается [TBoxBridgeService] в этом приложении, клиент подключается к нему.
  *
- * @param context контекст приложения
- * @param localPort локальный UDP порт (по умолчанию 11048)
- * @param remotePort удалённый UDP порт (по умолчанию 50047)
- * @param remoteAddress IP-адрес UDP сервера (по умолчанию 192.168.225.1)
- * @param tcpPort TCP порт для межприложенного взаимодействия (по умолчанию 1104)
- * @param host хост для TCP подключения (по умолчанию 127.0.0.1)
- * @param callback коллбэки для получения данных и логов
+ * Колбэки вызываются в главном потоке.
  *
- * @sample
- * // Вариант 1: Параметры по умолчанию
- * val client = TBoxClient(
- *     context = appContext,
- *     callback = myCallback
- * )
- *
- * @sample
- * // Вариант 2: Кастомные параметры
- * val client = TBoxClient(
- *     context = appContext,
- *     localPort = 11048,
- *     remotePort = 50047,
- *     remoteAddress = "192.168.225.1",
- *     tcpPort = 1104,
- *     callback = myCallback
- * )
+ * @param localPort локальный UDP-порт хоста (по умолчанию 11048)
+ * @param remotePort UDP-порт TBox (по умолчанию 50047)
+ * @param remoteAddress IP TBox (по умолчанию 192.168.225.1)
+ * @param tcpPort порт для клиентов 1.x/2.x (по умолчанию 1104)
+ * @param host адрес TCP-моста (по умолчанию 127.0.0.1)
+ * @param v3TcpPort порт протокола v3 (по умолчанию 1105)
+ * @param bindToTBoxNetwork хост привязывает UDP-сокет к сети TBox (`Network.bindSocket`),
+ *   чтобы трафик не уходил в Wi-Fi
  */
 class TBoxClient(
     private val context: Context,
@@ -62,7 +54,9 @@ class TBoxClient(
     private val remoteAddress: String = DEFAULT_REMOTE_ADDRESS,
     private val tcpPort: Int = DEFAULT_TCP_PORT,
     private val host: String = DEFAULT_HOST,
-    private val callback: TBoxClientCallback
+    private val callback: TBoxClientCallback,
+    private val v3TcpPort: Int = DEFAULT_V3_TCP_PORT,
+    private val bindToTBoxNetwork: Boolean = true
 ) {
 
     companion object {
@@ -70,346 +64,280 @@ class TBoxClient(
         const val DEFAULT_REMOTE_PORT = 50047
         const val DEFAULT_REMOTE_ADDRESS = "192.168.225.1"
         const val DEFAULT_TCP_PORT = 1104
+        const val DEFAULT_V3_TCP_PORT = 1105
         const val DEFAULT_HOST = "127.0.0.1"
-        private const val RECONNECT_DELAY_MS = 3000L
+        private const val RECONNECT_DELAY_MS = 1_000L
+        private const val RECONNECT_JITTER_MS = 500L
+        private const val HOST_START_POLL_MS = 250L
+        private const val HOST_START_ATTEMPTS = 20
+        private const val TAG = "TBoxClient"
     }
 
-    private var config: Config? = null
-    private var tcpClient: TcpClient? = null
-    private var isServerMode = false
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @Volatile
     private var scope: CoroutineScope? = null
+
+    @Volatile
+    private var connection: BridgeConnection? = null
+
+    @Volatile
     private var isInitialized = false
-    private var isReconnecting = false
-    private var reconnectJob: Job? = null
+
+    @Volatile
     private var isPhysicallyConnected = false
 
-    // Очередь для последовательной отправки команд
-    private lateinit var sendQueue: Channel<ByteArray>
-    private var sendJob: Job? = null
+    @Volatile
+    private var startedService = false
 
-    private data class Config(
-        val localPort: Int,
-        val remotePort: Int,
-        val remoteAddress: InetAddress,
-        val tcpPort: Int,
-        val host: String
-    )
+    private var connectJob: Job? = null
+    private var sendQueue: Channel<ByteArray>? = null
 
     fun initialize() {
         if (isInitialized) {
-            log(LogType.WARN, "TBoxClient", "Already initialized, ignoring duplicate init")
+            log(LogType.WARN, TAG, "Already initialized, ignoring duplicate init")
+            return
+        }
+        isInitialized = true
+        val clientScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        scope = clientScope
+        val queue = Channel<ByteArray>(Channel.UNLIMITED)
+        sendQueue = queue
+        clientScope.launch { sendLoop(queue) }
+
+        log(
+            LogType.INFO, TAG,
+            "Initialized ${TBoxProxyInfo.LIBRARY_VERSION}: UDP:$localPort → $remoteAddress:$remotePort, TCP:$tcpPort/v3:$v3TcpPort"
+        )
+        connectJob = clientScope.launch { connect() }
+    }
+
+    private suspend fun connect() {
+        val listener = ConnectionListener()
+
+        BridgeConnection.connectV3(host, v3TcpPort, context.packageName, ::log, listener)?.let {
+            onConnected(it, listener, "v3 host")
+            return
+        }
+        BridgeConnection.connectLegacy(host, tcpPort, ::log, listener)?.let {
+            onConnected(it, listener, "legacy host")
             return
         }
 
-        val inetAddress = try {
-            InetAddress.getByName(remoteAddress)
+        log(LogType.INFO, TAG, "No host on $host:$tcpPort/$v3TcpPort, starting local bridge")
+        startBridgeService()
+        repeat(HOST_START_ATTEMPTS) {
+            delay(HOST_START_POLL_MS)
+            if (!isInitialized) return
+            BridgeConnection.connectV3(host, v3TcpPort, context.packageName, ::log, listener)?.let {
+                onConnected(it, listener, "local bridge")
+                return
+            }
+        }
+        log(LogType.WARN, TAG, "Local bridge did not come up, retrying discovery")
+        scheduleReconnect()
+    }
+
+    private fun onConnected(created: BridgeConnection, listener: ConnectionListener, description: String) {
+        if (!isInitialized) {
+            created.close()
+            return
+        }
+        listener.connection = created
+        connection = created
+        if (!created.isConnected) {
+            connection = null
+            scheduleReconnect()
+            return
+        }
+        log(LogType.INFO, TAG, "Connected to $description")
+        postStatus(TBoxStatus(TBoxStatusType.CONNECTING, "TCP connected, waiting for TBox..."))
+    }
+
+    private fun startBridgeService() {
+        val intent = Intent(context, TBoxBridgeService::class.java).apply {
+            action = TBoxBridgeService.ACTION_START
+            putExtra(TBoxBridgeService.EXTRA_LOCAL_PORT, localPort)
+            putExtra(TBoxBridgeService.EXTRA_REMOTE_PORT, remotePort)
+            putExtra(TBoxBridgeService.EXTRA_REMOTE_ADDRESS, remoteAddress)
+            putExtra(TBoxBridgeService.EXTRA_TCP_PORT, tcpPort)
+            putExtra(TBoxBridgeService.EXTRA_V3_TCP_PORT, v3TcpPort)
+            putExtra(TBoxBridgeService.EXTRA_BIND_TO_TBOX_NETWORK, bindToTBoxNetwork)
+        }
+        try {
+            context.startForegroundServiceCompat(intent)
+            startedService = true
         } catch (e: Exception) {
-            callback.onLogMessage(LogType.ERROR, "TBoxClient", "Invalid address: $remoteAddress, using default")
-            InetAddress.getByName(DEFAULT_REMOTE_ADDRESS)
-        }
-
-        this.config = Config(localPort, remotePort, inetAddress, tcpPort, host)
-        this.scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-        this.isInitialized = true
-        
-        // Сбрасываем и создаём новую очередь при новой инициализации
-        sendJob?.cancel()
-        if (::sendQueue.isInitialized) {
-            sendQueue.close()
-        }
-        sendJob = null
-        sendQueue = Channel(Channel.UNLIMITED)
-
-        log(LogType.INFO, "TBoxClient", "Initialized with UDP:$localPort → $remoteAddress:$remotePort, TCP:$tcpPort")
-
-        scope?.launch {
-            discoverAndConnect()
-        }
-    }
-
-    private suspend fun discoverAndConnect() {
-        val cfg = config ?: return
-
-        val serverExists = TcpDiscovery.isServerAvailable(
-            host = cfg.host,
-            port = cfg.tcpPort,
-            timeoutMs = 300
-        )
-
-        if (serverExists) {
-            log(LogType.INFO, "TBoxClient", "Server found on port ${cfg.tcpPort}, connecting as client")
-            connectAsClient(cfg)
-        } else {
-            log(LogType.INFO, "TBoxClient", "No server found on port ${cfg.tcpPort}, starting local bridge")
-            startAsServer(cfg)
-        }
-    }
-
-    private fun createTcpCallback(): TBoxCallback {
-        return object : TBoxCallback {
-            override fun onDataReceived(data: ByteArray) {
-                if (!isPhysicallyConnected) {
-                    isPhysicallyConnected = true
-                    callback.onStatusChanged(TBoxStatus(TBoxStatusType.CONNECTED, "TBox is responding"))
-                    callback.onConnectionChanged(true)
-                }
-                callback.onDataReceived(TBoxReceivedMessage(data))
-            }
-
-            override fun onLogMessage(type: LogType, tag: String, message: String) {
-                callback.onLogMessage(type, "TcpClient.$tag", message)
-            }
-
-            override fun onConnectionChanged(connected: Boolean) {
-                if (connected) {
-                    callback.onStatusChanged(TBoxStatus(TBoxStatusType.CONNECTING, "TCP connected, waiting for TBox..."))
-                } else {
-                    if (isPhysicallyConnected) {
-                        isPhysicallyConnected = false
-                        callback.onStatusChanged(TBoxStatus(TBoxStatusType.DISCONNECTED, "Connection lost"))
-                        callback.onConnectionChanged(false)
-                    }
-                    if (isInitialized) {
-                        scheduleReconnect()
-                    }
-                }
-            }
-
-            override fun onStatusChanged(status: TBoxStatus) {
-                if (status.type == TBoxStatusType.LOG) {
-                    callback.onLogMessage(LogType.DEBUG, "Service", status.message)
-                } else {
-                    callback.onStatusChanged(status)
-                }
-            }
+            log(LogType.ERROR, TAG, "Failed to start bridge service: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
     private fun scheduleReconnect() {
-        if (isReconnecting) return
-        isReconnecting = true
-        isPhysicallyConnected = false
-
-        log(LogType.INFO, "TBoxClient", "Connection lost, reconnecting in ${RECONNECT_DELAY_MS}ms...")
-
-        // Очищаем текущее TCP-соединение
-        tcpClient?.disconnect()
-        tcpClient = null
-        sendJob?.cancel()
-        sendJob = null
-
-        reconnectJob = scope?.launch {
-            delay(RECONNECT_DELAY_MS)
-
-            if (!isInitialized) {
-                isReconnecting = false
-                return@launch
-            }
-
-            log(LogType.INFO, "TBoxClient", "Attempting reconnect...")
-            isServerMode = false
-
-            try {
-                discoverAndConnect()
-            } catch (e: Exception) {
-                log(LogType.ERROR, "TBoxClient", "Reconnect failed: ${e.message}")
-            }
-            isReconnecting = false
+        val clientScope = scope ?: return
+        if (!isInitialized) return
+        connectJob?.cancel()
+        connectJob = clientScope.launch {
+            delay(RECONNECT_DELAY_MS + Random.nextLong(RECONNECT_JITTER_MS))
+            if (!isInitialized) return@launch
+            log(LogType.INFO, TAG, "Attempting reconnect...")
+            connect()
         }
     }
 
-    private suspend fun connectAsClient(cfg: Config) {
-        tcpClient = TcpClient(
-            host = cfg.host,
-            port = cfg.tcpPort,
-            callback = createTcpCallback()
+    private fun setPhysicallyConnected(connected: Boolean, message: String) {
+        if (isPhysicallyConnected == connected) return
+        isPhysicallyConnected = connected
+        postStatus(
+            TBoxStatus(if (connected) TBoxStatusType.CONNECTED else TBoxStatusType.DISCONNECTED, message)
         )
-
-        val connected = tcpClient?.connect() == true
-        if (!connected) {
-            log(LogType.WARN, "TBoxClient", "Failed to connect to server, trying to start local server")
-            startAsServer(cfg)
-        } else {
-            startSendProcessor()
-        }
+        mainHandler.post { callback.onConnectionChanged(connected) }
     }
 
-    private fun startAsServer(cfg: Config) {
-        val intent = Intent(context, TBoxBridgeService::class.java).apply {
-            action = TBoxBridgeService.ACTION_START
-            putExtra(TBoxBridgeService.EXTRA_LOCAL_PORT, cfg.localPort)
-            putExtra(TBoxBridgeService.EXTRA_REMOTE_PORT, cfg.remotePort)
-            putExtra(TBoxBridgeService.EXTRA_REMOTE_ADDRESS, cfg.remoteAddress.hostAddress)
-            putExtra(TBoxBridgeService.EXTRA_TCP_PORT, cfg.tcpPort)
+    private inner class ConnectionListener : BridgeConnection.Listener {
+        @Volatile
+        var connection: BridgeConnection? = null
+
+        private fun isCurrent(): Boolean = connection != null && connection === this@TBoxClient.connection
+
+        override fun onData(data: ByteArray) {
+            setPhysicallyConnected(true, "TBox is responding")
+            val message = TBoxReceivedMessage(data)
+            mainHandler.post { callback.onDataReceived(message) }
         }
 
-        context.startForegroundServiceCompat(intent)
-        isServerMode = true
-
-        scope?.launch {
-            delay(500)
-
-            tcpClient = TcpClient(
-                host = cfg.host,
-                port = cfg.tcpPort,
-                callback = createTcpCallback()
-            )
-
-            val connected = tcpClient?.connect() == true
-            if (connected) {
-                log(LogType.INFO, "TBoxClient", "Connected to local server (loopback)")
-                startSendProcessor()
-            } else {
-                log(LogType.ERROR, "TBoxClient", "Failed to connect to local server")
-            }
-        }
-    }
-
-    /**
-     * Запускает обработчик очереди отправки.
-     * Обрабатывает команды последовательно в порядке добавления.
-     */
-    private fun startSendProcessor() {
-        sendJob?.cancel()
-        sendJob = scope?.launch(Dispatchers.IO) {
-            for (data in sendQueue) {
-                val client = tcpClient
-                if (client != null && client.isConnected) {
-                    val sent = client.send(data)
-                    withContext(Dispatchers.Main) {
-                        if (sent) {
-                            log(LogType.DEBUG, "TBoxClient", "→ Sent via TCP: ${data.toLogString()}")
-                        } else {
-                            log(LogType.ERROR, "TBoxClient", "Failed to send data")
-                        }
-                    }
-                } else {
-                    log(LogType.ERROR, "TBoxClient", "Not connected, cannot send")
+        override fun onStatus(status: TBoxStatus) {
+            when (status.type) {
+                TBoxStatusType.LOG -> mainHandler.post {
+                    callback.onLogMessage(LogType.DEBUG, "Service", status.message)
                 }
+                TBoxStatusType.TBOX_SILENT -> {
+                    setPhysicallyConnected(false, status.message)
+                    postStatus(status)
+                }
+                else -> postStatus(status)
             }
         }
-        log(LogType.INFO, "TBoxClient", "Send processor started")
+
+        override fun onHostInfo(info: TBoxHostInfo) {
+            if (info.isLegacy) {
+                postStatus(
+                    TBoxStatus(
+                        TBoxStatusType.LEGACY_HOST,
+                        "Host uses tbox-proxy 1.x/2.x (${info.protocol}): no TBox network binding, no v3 statuses",
+                        info.protocol.name
+                    )
+                )
+            } else {
+                log(
+                    LogType.INFO, TAG,
+                    "Host ${info.hostPackage} lib=${info.libraryVersion} bound=${info.networkBound} iface=${info.networkInterface}"
+                )
+            }
+        }
+
+        override fun onClosed(reason: String) {
+            if (!isCurrent()) return
+            this@TBoxClient.connection = null
+            log(LogType.INFO, TAG, "Connection lost: $reason")
+            setPhysicallyConnected(false, "Connection lost")
+            if (isInitialized) scheduleReconnect()
+        }
+    }
+
+    private suspend fun sendLoop(queue: Channel<ByteArray>) {
+        for (data in queue) {
+            val current = connection
+            if (current == null || !current.isConnected) {
+                log(LogType.WARN, TAG, "Not connected, dropping ${data.size} bytes")
+                continue
+            }
+            if (current.send(data)) {
+                log(LogType.DEBUG, TAG, "→ Sent via TCP: ${data.toLogString()}")
+            } else {
+                log(LogType.ERROR, TAG, "Failed to send data")
+            }
+        }
     }
 
     /**
-     * Отправляет raw данные в TBox через TCP мост.
-     * 
-     * Метод **асинхронный** — не блокирует вызывающий поток.
-     * Можно безопасно вызывать из UI-потока.
-     * 
-     * Команды отправляются **последовательно** в порядке вызова.
-     * 
-     * @param data данные для отправки (команда с заголовком и checksum)
-     * 
-     * @sample
-     * // Вызов из UI-потока — безопасно
-     * button.setOnClickListener {
-     *     tboxClient.sendRawMessage(command)
-     * }
-     * 
-     * @sample
-     * // Серийная отправка — команды уйдут по порядку
-     * tboxClient.sendCommand(cmd1)
-     * tboxClient.sendCommand(cmd2)
-     * tboxClient.sendCommand(cmd3)
+     * Отправляет raw-данные в TBox через мост. Асинхронно, порядок вызовов сохраняется.
+     * Без подключения к хосту данные отбрасываются (как в 2.x).
      */
     fun sendRawMessage(data: ByteArray) {
-        val client = tcpClient
-        if (client != null && client.isConnected) {
-            // Добавляем в очередь для последовательной отправки
-            if (!sendQueue.trySend(data).isSuccess) {
-                log(LogType.ERROR, "TBoxClient", "Failed to queue data for sending")
-            }
-        } else {
-            log(LogType.ERROR, "TBoxClient", "Not connected, cannot send")
+        val current = connection
+        if (current == null || !current.isConnected) {
+            log(LogType.WARN, TAG, "Not connected, cannot send")
+            return
+        }
+        if (sendQueue?.trySend(data)?.isSuccess != true) {
+            log(LogType.ERROR, TAG, "Failed to queue data for sending")
         }
     }
 
-    /**
-     * Отправляет команду в TBox.
-     * 
-     * Метод асинхронный — не блокирует вызывающий поток.
-     * 
-     * @param tid идентификатор транзакции
-     * @param sid идентификатор системы
-     * @param cmd код команды
-     * @param data данные команды
-     * 
-     * @sample
-     * // Отправка команды получения CAN-фреймов
-     * tboxClient.sendCommand(0x01, 0x10, 0x15, byteArrayOf(0x01, 0x02))
-     */
     fun sendCommand(tid: Byte, sid: Byte, cmd: Byte, data: ByteArray) {
         val fullData = ByteConverter.fillHeader(data.size, tid, sid, cmd) + data
         val checksum = ByteConverter.xorSum(fullData)
         sendRawMessage(fullData + checksum)
     }
 
-    /**
-     * Отправляет команду в TBox.
-     * 
-     * Метод асинхронный — не блокирует вызывающий поток.
-     * 
-     * @param command объект команды
-     * 
-     * @sample
-     * // Создание и отправка команды
-     * val command = TBoxCommand(
-     *     tid = TBoxConstants.CRT_CODE,
-     *     sid = TBoxConstants.GATE_CODE,
-     *     cmd = 0x15,
-     *     data = byteArrayOf(0x01, 0x02)
-     * )
-     * tboxClient.sendCommand(command)
-     */
     fun sendCommand(command: TBoxCommand) {
-        log(LogType.INFO, "TBoxClient", "${command.textMessage} Sending command: tid: ${command.tid} sid: ${command.sid} cmd: ${command.cmd} data: ${command.data.toLogString()} ")
+        log(
+            LogType.INFO, TAG,
+            "${command.textMessage} Sending command: tid: ${command.tid} sid: ${command.sid} cmd: ${command.cmd} data: ${command.data.toLogString()} "
+        )
         sendCommand(command.tid, command.sid, command.cmd, command.data)
     }
 
-    fun isConnected(): Boolean {
-        return isPhysicallyConnected
-    }
+    /** `true` после первого пакета от TBox и до потери связи или долгого молчания TBox. */
+    fun isConnected(): Boolean = isPhysicallyConnected
 
-    fun getMode(): String = if (isServerMode) "SERVER" else "CLIENT"
+    /** `SERVER` — хост моста работает в этом приложении. */
+    fun getMode(): String = if (isHostedHere()) "SERVER" else "CLIENT"
+
+    /** Сведения о хосте; `null`, пока нет соединения. Для хостов 1.x/2.x известен только протокол. */
+    fun getHostInfo(): TBoxHostInfo? = connection?.hostInfo
+
+    /** Протокол обмена с текущим хостом; `null`, пока нет соединения или формат ещё не определён. */
+    fun getWireProtocol(): TBoxWireProtocol? = getHostInfo()?.protocol
+
+    private fun isHostedHere(): Boolean = getHostInfo()?.hostPackage == context.packageName
 
     fun destroy() {
         if (!isInitialized) return
-
-        log(LogType.INFO, "TBoxClient", "Destroying...")
-
+        log(LogType.INFO, TAG, "Destroying...")
+        val hostedHere = isHostedHere() || startedService
         isInitialized = false
         isPhysicallyConnected = false
-        reconnectJob?.cancel()
-        reconnectJob = null
-        isReconnecting = false
-
-        sendJob?.cancel()
-        sendJob = null
-        if (::sendQueue.isInitialized) {
-            sendQueue.close()
-        }
-
+        connectJob?.cancel()
+        connectJob = null
+        sendQueue?.close()
+        sendQueue = null
+        val current = connection
+        connection = null
+        current?.close()
         scope?.cancel()
-        tcpClient?.disconnect()
-        tcpClient = null
+        scope = null
 
-        if (isServerMode) {
+        if (hostedHere) {
             try {
                 context.stopService(Intent(context, TBoxBridgeService::class.java))
             } catch (e: Exception) {
-                log(LogType.WARN, "TBoxClient", "Failed to stop service: ${e.message}")
+                log(LogType.WARN, TAG, "Failed to stop service: ${e.message}")
             }
         }
+        startedService = false
+        log(LogType.INFO, TAG, "Destroyed complete")
+    }
 
-        scope = null
-        config = null
-        isServerMode = false
-
-        log(LogType.INFO, "TBoxClient", "Destroyed complete")
+    private fun postStatus(status: TBoxStatus) {
+        mainHandler.post { callback.onStatusChanged(status) }
     }
 
     private fun log(type: LogType, tag: String, message: String) {
-        callback.onLogMessage(type, tag, message)
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            callback.onLogMessage(type, tag, message)
+        } else {
+            mainHandler.post { callback.onLogMessage(type, tag, message) }
+        }
     }
 }

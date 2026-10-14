@@ -37,16 +37,7 @@ dependencyResolutionManagement {
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("com.github.jsparrow2006:tbox-proxy:v1.1.0")
-}
-```
-
-or
-
-```kotlin
-// build.gradle.kts
-dependencies {
-    implementation("com.github.jsparrow2006:tbox-proxy:v1.+")
+    implementation("com.github.jsparrow2006:tbox-proxy:v3.0.0")
 }
 ```
 
@@ -76,9 +67,14 @@ val client = TBoxClient(
     remotePort = 50047,
     remoteAddress = "192.168.225.1",
     tcpPort = 1104,
-    callback = myCallback
+    callback = myCallback,
+    v3TcpPort = 1105,
+    bindToTBoxNetwork = true
 )
 ```
+
+`bindToTBoxNetwork` binds the host's UDP socket to the network that owns the TBox subnet
+(`usb0`). Without it, Android 10 head units with Wi-Fi enabled route TBox traffic to `wlan0`.
 
 ### 2. Set up event handlers
 
@@ -131,13 +127,16 @@ On first launch (no host running), the library automatically starts its own serv
 Subsequent apps simply subscribe to the existing host.
 
 **Connection lifecycle:**
-1. `initialize()` starts TCP discovery
-2. If no existing host found, starts `TBoxBridgeService`
-3. Service binds UDP socket and sends a wake-up command to TBox
+1. `initialize()` looks for a 3.x host on port 1105, then for a 1.x/2.x host on port 1104
+2. If no host is found, starts `TBoxBridgeService`
+3. Service binds the UDP socket to the TBox network and sends a wake-up command to TBox
 4. `onStatusChanged(CONNECTING)` fires when TCP is connected
 5. `onConnectionChanged(true)` fires **only when TBox responds with data**
 6. `isConnected()` returns `true` only after TBox physically responds
-7. If TBox stops responding (5s timeout), watchdog disconnects and auto-reconnects
+7. If TBox is silent for 10 s, `onConnectionChanged(false)` fires; the bridge keeps running and probes TBox
+
+`getHostInfo()` / `getWireProtocol()` tell which host the client is connected to.
+`getMode()` returns `SERVER` when the bridge runs in this app.
 
 ### 4. Send commands to TBox
 
@@ -196,20 +195,34 @@ The library provides typed status events via `TBoxStatusType`:
 | `TCP_SERVER_STARTED` | TCP server started |
 | `TCP_SERVER_ERROR` | TCP server failed to start |
 | `LOG` | Internal log message (forwarded to `onLogMessage`) |
+| `NETWORK_BOUND` | UDP socket bound to the TBox network (`usb0`) |
+| `NETWORK_UNBOUND` | TBox network not found, UDP uses the default route |
+| `TBOX_SILENT` | No data from TBox for 10 s, host is probing |
+| `TBOX_RESPONDING` | TBox answers again after `TBOX_SILENT` |
+| `LEGACY_HOST` | Connected to a 1.x/2.x host: no network binding, no 3.x statuses |
 
 ---
 
 ## Auto-Reconnection
 
-The library handles connection loss automatically:
-
 1. **Watchdog** monitors UDP data flow (TBox sends data every ~1 second)
-2. If no data received for 5 seconds, the bridge service shuts down
-3. TCP connection breaks, triggering `onConnectionChanged(false)`
-4. After 3 seconds, the library automatically attempts to reconnect
-5. Race condition: multiple clients compete to become the new host (first one wins)
+2. After 10 s of silence the host reports `TBOX_SILENT`, probes TBox every 10 s and recreates
+   the UDP socket after 3 unanswered probes. The bridge itself keeps running.
+3. If the host process dies, clients reconnect after 1–1.5 s (random jitter);
+   the first one to find no host starts a new bridge, the rest connect to it.
 
 To stop reconnection, call `tboxClient.destroy()`.
+
+---
+
+## Compatibility with 1.x / 2.x
+
+- A 3.x host serves 1.x and 2.1 apps on port 1104; each client's format is detected from its first frame.
+- A 3.x client works with a 1.x/2.x host and reports `LEGACY_HOST`. On Android 10 head units
+  with Wi-Fi enabled such a host cannot send commands to TBox (its socket is not bound to `usb0`).
+- 1.0.x clients never reconnect after the host dies; keep the host alive.
+
+Wire formats, handshake and detection rules: [PROTOCOL.md](PROTOCOL.md). Changes: [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -231,7 +244,8 @@ Ensure your app has permission to run foreground services (especially on Android
 
 - **Seamless failover**: if the host dies, any client can become the new host.
 - **Auto-reconnection**: automatically reconnects when TBox stops responding.
-- **Watchdog monitoring**: detects TBox unavailability within 5 seconds.
+- **Watchdog monitoring**: detects TBox unavailability within 10 seconds without stopping the bridge.
+- **TBox network binding**: works on Android 10 head units with Wi-Fi enabled.
 - **Typed status events**: know exactly what's happening via `TBoxStatusType`.
 - **Service log forwarding**: all internal logs (UDP, TCP, watchdog) visible via `onLogMessage`.
 - **Raw data delivery**: receives `ByteArray` — you control parsing logic.

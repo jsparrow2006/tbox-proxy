@@ -1,286 +1,264 @@
 package dashingineering.jetour.tboxcore.tcp
 
-import android.os.Handler
-import android.os.Looper
 import dashingineering.jetour.tboxcore.types.LogType
-import dashingineering.jetour.tboxcore.types.TBoxCallback
+import dashingineering.jetour.tboxcore.types.TBoxHostInfo
 import dashingineering.jetour.tboxcore.types.TBoxStatus
-import dashingineering.jetour.tboxcore.udp.UdpSocketManager
-import kotlinx.coroutines.*
-import java.io.DataInputStream
-import java.io.DataOutputStream
+import dashingineering.jetour.tboxcore.types.TBoxStatusType
+import dashingineering.jetour.tboxcore.types.TBoxWireProtocol
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import java.io.BufferedOutputStream
+import java.io.Closeable
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 
-class TcpServer(
-    private val port: Int,
-    private val udpManager: UdpSocketManager,
-    private val callback: TBoxCallback
+internal typealias BridgeLogger = (type: LogType, tag: String, message: String) -> Unit
+
+/**
+ * Локальный TCP-сервер моста.
+ *
+ * - [legacyPort] (1104) — клиенты 1.x/2.x. Формат по умолчанию — 1.x; клиент 2.1.x
+ *   распознаётся по первому присланному кадру.
+ * - [v3Port] (1105) — клиенты 3.x: рукопожатие HELLO → HOST_INFO, данные и статусы.
+ *
+ * Каждый клиент пишется своей корутиной из своей очереди: медленный клиент не тормозит
+ * остальных, а кадры в сокете не перемешиваются.
+ */
+internal class TcpServer(
+    private val legacyPort: Int,
+    private val v3Port: Int,
+    private val hostInfo: () -> TBoxHostInfo,
+    private val onClientData: suspend (ByteArray) -> Unit,
+    private val log: BridgeLogger
 ) {
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private var serverSocket: ServerSocket? = null
-    private val clients = CopyOnWriteArrayList<ClientHandler>()
+    private val clients = CopyOnWriteArrayList<ClientConnection>()
+    private val servers = CopyOnWriteArrayList<ServerSocket>()
+    private val running = AtomicBoolean(false)
     private var scope: CoroutineScope? = null
-    private var isRunning = false
 
-    private fun onLogMessage(type: LogType, tag: String, message: String) {
-        mainHandler.post {
-            callback.onLogMessage(type, tag, message)
+    /** `false`, если не удалось занять [legacyPort]. Порт v3 необязателен. */
+    fun start(): Boolean {
+        if (!running.compareAndSet(false, true)) return true
+        val serverScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        scope = serverScope
+
+        val legacy = bind(legacyPort)
+        if (legacy == null) {
+            running.set(false)
+            serverScope.cancel()
+            scope = null
+            return false
         }
+        serverScope.launch { acceptLoop(legacy, Endpoint.LEGACY) }
+
+        if (v3Port > 0) {
+            bind(v3Port)?.let { v3 -> serverScope.launch { acceptLoop(v3, Endpoint.V3) } }
+        }
+        return true
     }
 
-    suspend fun start(): Boolean {
-        if (isRunning) return true
-
-        return withContext(Dispatchers.IO) {
-            try {
-                serverSocket = ServerSocket(port, 50, InetAddress.getByName("127.0.0.1")).apply {
-                    reuseAddress = true
-                }
-
-                scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-                isRunning = true
-
-                onLogMessage(LogType.INFO, "TcpServer", "Started on port $port")
-
-                scope?.launch {
-                    acceptLoop()
-                }
-
-                onLogMessage(LogType.INFO, "TcpServer", "Accept loop started, ready for clients")
-                true
-
-            } catch (e: Exception) {
-                onLogMessage(LogType.ERROR, "TcpServer", "Start failed: ${e.javaClass.simpleName}: ${e.message}")
-                false
-            }
-        }
+    fun stop() {
+        if (!running.compareAndSet(true, false)) return
+        servers.forEach { runCatching { it.close() } }
+        servers.clear()
+        clients.forEach { it.close() }
+        clients.clear()
+        scope?.cancel()
+        scope = null
+        log(LogType.INFO, TAG, "Stopped")
     }
 
-    private suspend fun acceptLoop() {
-        while (isRunning && !serverSocket?.isClosed!!) {
-            try {
-                val clientSocket = serverSocket?.accept() ?: break
-                onLogMessage(LogType.INFO, "TcpServer", "Client connected from ${clientSocket.inetAddress}")
+    val clientCount: Int get() = clients.size
 
-                val handler = ClientHandler(clientSocket, callback, udpManager)
-                clients.add(handler)
-                onLogMessage(LogType.INFO, "TcpServer", "Total clients: ${clients.size}")
-
-                scope?.launch {
-                    handler.handle()
-                    // Клиент отключился — удаляем из списка
-                    clients.remove(handler)
-                    onLogMessage(LogType.INFO, "TcpServer", "Client removed. Total clients: ${clients.size}")
-                }
-            } catch (e: Exception) {
-                if (isRunning) {
-                    onLogMessage(LogType.ERROR, "TcpServer", "Accept error: ${e.message}")
-                }
+    fun broadcastData(data: ByteArray) {
+        if (data.isEmpty()) return
+        val frames = LazyFrames { protocol ->
+            when (protocol) {
+                TBoxWireProtocol.LEGACY_V1 -> FrameCodec.encodeLegacy(data)
+                TBoxWireProtocol.TYPED_V2, TBoxWireProtocol.V3 -> FrameCodec.encode(data, FrameCodec.TYPE_DATA)
             }
         }
-        onLogMessage(LogType.INFO, "TcpServer", "Accept loop stopped")
-    }
-
-    fun broadcastToClients(data: ByteArray) {
-        if (clients.isEmpty()) {
-            onLogMessage(LogType.DEBUG, "TcpServer", "No clients to broadcast to")
-            return
-        }
-
-        val frame = FrameCodec.encode(data, FrameCodec.TYPE_DATA)
-        scope?.launch {
-            var sentCount = 0
-            val deadClients = mutableListOf<ClientHandler>()
-            
-            clients.forEach { client ->
-                try {
-                    client.sendRaw(frame)
-                    sentCount++
-                } catch (e: Exception) {
-                    onLogMessage(LogType.WARN, "TcpServer", "Send to client failed: ${e.message}")
-                    deadClients.add(client)
-                }
-            }
-            
-            deadClients.forEach { client ->
-                client.close()
-                clients.remove(client)
-            }
-            
-            if (deadClients.isNotEmpty()) {
-                onLogMessage(LogType.INFO, "TcpServer", "Removed ${deadClients.size} dead clients. Total: ${clients.size}")
-            }
-            
-            onLogMessage(LogType.DEBUG, "TcpServer", "Broadcast to $sentCount/${clients.size} clients: ${data.size} bytes")
-        }
+        clients.forEach { client -> client.protocolForData()?.let { client.enqueue(frames[it]) } }
     }
 
     fun broadcastStatus(status: TBoxStatus) {
-        if (clients.isEmpty()) return
+        val frame by lazy { FrameCodec.encode(status.toByteArray(), FrameCodec.TYPE_STATUS) }
+        clients.forEach { client -> if (client.acceptsStatus(status.type)) client.enqueue(frame) }
+    }
 
-        val frame = FrameCodec.encode(status.toByteArray(), FrameCodec.TYPE_STATUS)
-        scope?.launch {
-            val deadClients = mutableListOf<ClientHandler>()
+    fun broadcastHostInfo() {
+        val frame = FrameCodec.encode(WireProtocol.encodeHostInfo(hostInfo()), FrameCodec.TYPE_HOST_INFO)
+        clients.forEach { client -> if (client.isV3Ready) client.enqueue(frame) }
+    }
 
-            clients.forEach { client ->
-                try {
-                    client.sendRaw(frame)
-                } catch (_: Exception) {
-                    deadClients.add(client)
-                }
+    private fun bind(port: Int): ServerSocket? = try {
+        ServerSocket().apply {
+            reuseAddress = true
+            bind(InetSocketAddress(InetAddress.getByName(LOOPBACK), port), BACKLOG)
+        }.also {
+            servers += it
+            log(LogType.INFO, TAG, "Listening on $LOOPBACK:$port")
+        }
+    } catch (e: Exception) {
+        log(LogType.ERROR, TAG, "Bind $port failed: ${e.javaClass.simpleName}: ${e.message}")
+        null
+    }
+
+    private fun acceptLoop(server: ServerSocket, endpoint: Endpoint) {
+        while (running.get() && !server.isClosed) {
+            val socket = try {
+                server.accept()
+            } catch (e: Exception) {
+                if (running.get()) log(LogType.ERROR, TAG, "Accept error on ${server.localPort}: ${e.message}")
+                continue
             }
-
-            deadClients.forEach { client ->
-                client.close()
+            socket.tcpNoDelay = true
+            val client = ClientConnection(socket, endpoint)
+            clients += client
+            log(LogType.INFO, TAG, "Client connected (${endpoint.name.lowercase()}:${socket.port}), total=${clients.size}")
+            scope?.launch { client.writeLoop() }
+            scope?.launch {
+                client.readLoop()
                 clients.remove(client)
+                log(LogType.INFO, TAG, "Client disconnected (${endpoint.name.lowercase()}:${socket.port}), total=${clients.size}")
             }
         }
     }
 
-    suspend fun stop() {
-        if (!isRunning) return
-        isRunning = false
+    private enum class Endpoint { LEGACY, V3 }
 
-        onLogMessage(LogType.INFO, "TcpServer", "Stopping...")
-
-        // Закрываем всех клиентов
-        clients.forEach { it.close() }
-        clients.clear()
-
-        // Закрываем сервер
-        serverSocket?.close()
-        serverSocket = null
-
-        // Отменяем корутины
-        scope?.cancel()
-        scope = null
-
-        onLogMessage(LogType.INFO, "TcpServer", "Stopped")
+    private class LazyFrames(private val encode: (TBoxWireProtocol) -> ByteArray) {
+        private val cache = HashMap<TBoxWireProtocol, ByteArray>(2)
+        operator fun get(protocol: TBoxWireProtocol): ByteArray = cache.getOrPut(protocol) { encode(protocol) }
     }
 
-    fun getConnectedClientsCount(): Int = clients.size
-}
+    private inner class ClientConnection(
+        private val socket: Socket,
+        private val endpoint: Endpoint
+    ) : Closeable {
+        private val outbox = Channel<ByteArray>(OUTBOX_CAPACITY, BufferOverflow.DROP_OLDEST)
+        private val closed = AtomicBoolean(false)
 
-private class ClientHandler(
-    private val socket: Socket,
-    private val callback: TBoxCallback,
-    private val udpManager: UdpSocketManager
-) {
-    private val input = DataInputStream(socket.getInputStream())
-    private val output = DataOutputStream(socket.getOutputStream())
-    private val buffer = ByteArray(65536)
-    private var offset = 0
-    private var isActive = true
+        @Volatile
+        private var protocol: TBoxWireProtocol? =
+            if (endpoint == Endpoint.LEGACY) TBoxWireProtocol.LEGACY_V1 else null
 
-    private val mainHandler = Handler(Looper.getMainLooper())
+        @Volatile
+        private var protocolDetected = endpoint == Endpoint.V3
 
-    private fun onLogMessage(type: LogType, tag: String, message: String) {
-        mainHandler.post {
-            callback.onLogMessage(type, tag, message)
+        val isV3Ready: Boolean get() = protocol == TBoxWireProtocol.V3
+
+        /** Протокол для кадров данных; `null` — клиенту v3 ещё рано (нет HELLO). */
+        fun protocolForData(): TBoxWireProtocol? = protocol
+
+        fun acceptsStatus(type: TBoxStatusType): Boolean = when (protocol) {
+            TBoxWireProtocol.V3 -> true
+            TBoxWireProtocol.TYPED_V2 -> type.ordinal <= TBoxStatusType.LAST_V2_STATUS.ordinal
+            TBoxWireProtocol.LEGACY_V1, null -> false
         }
-    }
 
-    suspend fun handle() {
-        try {
-            while (isActive && socket.isConnected && !socket.isClosed) {
-                val data = receive()
-                if (data == null) {
-                    // read() вернул -1 — соединение разорвано
-                    if (!isActive) {
-                        onLogMessage(LogType.INFO, "ClientHandler", "Connection closed by remote")
-                        return
-                    }
-                    // Просто нет данных — небольшая пауза
-                    delay(10)
-                    continue
-                }
-
-                onLogMessage(LogType.DEBUG, "ClientHandler", "Received ${data.size} bytes from client, forwarding to UDP")
-                val sent = udpManager.send(data)
-                onLogMessage(LogType.DEBUG, "ClientHandler", "Forwarded to UDP: $sent")
-            }
-        } catch (e: Exception) {
-            onLogMessage(LogType.ERROR, "ClientHandler", "Handler error: ${e.javaClass.simpleName}: ${e.message}")
-        } finally {
-            close()
+        fun enqueue(frame: ByteArray) {
+            if (!closed.get()) outbox.trySend(frame)
         }
-    }
 
-    suspend fun receive(): ByteArray? {
-        return withContext(Dispatchers.IO) {
+        suspend fun writeLoop() {
             try {
-                // Блокирующий read — ждём данные
-                // read() вернёт -1 при разрыве соединения
-                val read = input.read(buffer, offset, buffer.size - offset)
-                
-                if (read <= 0) {
-                    // -1 = соединение разорвано, 0 = нет данных (неблокирующий режим)
-                    if (read == -1) {
-                        this@ClientHandler.isActive = false
-                    }
-                    return@withContext null
+                val output = BufferedOutputStream(socket.getOutputStream())
+                for (frame in outbox) {
+                    output.write(frame)
+                    while (true) output.write(outbox.tryReceive().getOrNull() ?: break)
+                    output.flush()
                 }
-
-                offset += read
-
-                var processed = 0
-                while (processed < offset) {
-                    when (val result = FrameCodec.decode(buffer, processed)) {
-                        is FrameCodec.DecodeResult.Success -> {
-                            // Сдвигаем буфер если остались необработанные данные
-                            if (result.consumed < offset) {
-                                val remaining = offset - result.consumed
-                                System.arraycopy(buffer, result.consumed, buffer, 0, remaining)
-                                offset = remaining
-                            } else {
-                                offset = 0
-                            }
-                            return@withContext result.data
-                        }
-                        is FrameCodec.DecodeResult.Incomplete -> {
-                            // Нужно больше данных
-                            return@withContext null
-                        }
-                        is FrameCodec.DecodeResult.Error -> {
-                            onLogMessage(LogType.ERROR, "ClientHandler", result.message)
-                            this@ClientHandler.isActive = false
-                            return@withContext null
-                        }
-                    }
-                }
-                null
             } catch (e: Exception) {
-                onLogMessage(LogType.ERROR, "ClientHandler", "Receive error: ${e.javaClass.simpleName}: ${e.message}")
-                this@ClientHandler.isActive = false
-                null
+                if (!closed.get()) log(LogType.WARN, TAG, "Write to client failed: ${e.message}")
+            } finally {
+                close()
             }
         }
-    }
 
-    suspend fun sendRaw(frame: ByteArray): Boolean {
-        return withContext(Dispatchers.IO) {
+        suspend fun readLoop() {
+            val reader = FrameReader()
+            val chunk = ByteArray(READ_CHUNK)
             try {
-                output.write(frame)
-                output.flush()
-                true
+                val input = socket.getInputStream()
+                while (!closed.get()) {
+                    val read = input.read(chunk)
+                    if (read < 0) break
+                    if (read == 0) continue
+                    for (body in reader.append(chunk, read)) handleBody(body)
+                }
+            } catch (e: FrameReader.FrameException) {
+                log(LogType.ERROR, TAG, "Protocol error from client: ${e.message}")
             } catch (e: Exception) {
-                onLogMessage(LogType.ERROR, "ClientHandler", "Send failed: ${e.message}")
-                false
+                if (!closed.get()) log(LogType.WARN, TAG, "Read from client failed: ${e.message}")
+            } finally {
+                close()
             }
+        }
+
+        private suspend fun handleBody(body: ByteArray) {
+            when (endpoint) {
+                Endpoint.LEGACY -> handleLegacy(body)
+                Endpoint.V3 -> handleV3(body)
+            }
+        }
+
+        private suspend fun handleLegacy(body: ByteArray) {
+            if (!protocolDetected) {
+                protocol = WireProtocol.detectLegacyClientFormat(body)
+                protocolDetected = true
+                log(LogType.INFO, TAG, "Legacy client:${socket.port} uses $protocol")
+            }
+            val data = when (protocol) {
+                TBoxWireProtocol.TYPED_V2 -> if (body[0] == FrameCodec.TYPE_DATA) body.copyOfRange(1, body.size) else null
+                else -> body
+            }
+            if (data != null && data.isNotEmpty()) onClientData(data)
+        }
+
+        private suspend fun handleV3(body: ByteArray) {
+            val type = body[0]
+            val payload = body.copyOfRange(1, body.size)
+            if (protocol == null) {
+                val hello = if (type == FrameCodec.TYPE_HELLO) WireProtocol.decodeHello(payload) else null
+                if (hello == null) {
+                    log(LogType.WARN, TAG, "v3 client:${socket.port} did not start with HELLO, closing")
+                    close()
+                    return
+                }
+                log(LogType.INFO, TAG, "v3 client:${socket.port} ${hello.clientPackage} lib=${hello.libraryVersion} proto=${hello.protocolVersion}")
+                enqueueHostInfo()
+                protocol = TBoxWireProtocol.V3
+                return
+            }
+            if (type == FrameCodec.TYPE_DATA && payload.isNotEmpty()) onClientData(payload)
+        }
+
+        private fun enqueueHostInfo() {
+            enqueue(FrameCodec.encode(WireProtocol.encodeHostInfo(hostInfo()), FrameCodec.TYPE_HOST_INFO))
+        }
+
+        override fun close() {
+            if (!closed.compareAndSet(false, true)) return
+            outbox.close()
+            runCatching { socket.close() }
         }
     }
 
-    fun close() {
-        if (!isActive) return
-        isActive = false
-
-        try { socket.close() } catch (_: Exception) {}
-        try { input.close() } catch (_: Exception) {}
-        try { output.close() } catch (_: Exception) {}
-
-        onLogMessage(LogType.INFO, "ClientHandler", "Client connection closed")
+    private companion object {
+        const val TAG = "TcpServer"
+        const val LOOPBACK = "127.0.0.1"
+        const val BACKLOG = 50
+        const val READ_CHUNK = 16 * 1024
+        const val OUTBOX_CAPACITY = 1024
     }
 }
